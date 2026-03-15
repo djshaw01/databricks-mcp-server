@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "databricks": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${workspaceFolder}",
+        "run",
+        "databricks-mcp"
+      ],
+      "envFile": "${workspaceFolder}/.env"
+    }
+  }
+}

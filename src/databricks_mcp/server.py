@@ -9,10 +9,13 @@ from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
 from databricks.sdk.service.pipelines import PipelineState
+from mcp.server.fastmcp import FastMCP
+
+from databricks_mcp.sql_query import QueryValidationError, execute_safe_query
 
 load_dotenv()
 
@@ -20,8 +23,8 @@ mcp = FastMCP(
     "Databricks",
     instructions=(
         "Browse and inspect Databricks jobs, job runs, Delta Live Tables pipelines, "
-        "and pipeline updates. Use these tools to monitor workflow status, diagnose "
-        "failures, and retrieve run details."
+        "pipeline updates, and read-only SQL queries. Use these tools to monitor "
+        "workflow status, diagnose failures, inspect data, and retrieve run details."
     ),
 )
 
@@ -41,6 +44,34 @@ def _get_client() -> WorkspaceClient:
     return WorkspaceClient(host=host)
 
 
+def _get_warehouse_id() -> str:
+    warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID")
+    if not warehouse_id:
+        raise ValueError(
+            "DATABRICKS_WAREHOUSE_ID must be set to the serverless SQL warehouse to use for read-only queries."
+        )
+    return warehouse_id
+
+
+def _get_sql_poll_timeout_seconds() -> int:
+    value = os.environ.get("DATABRICKS_SQL_POLL_TIMEOUT_SECONDS", "").strip()
+    if not value:
+        return 120
+
+    try:
+        timeout_seconds = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS must be a positive integer number of seconds."
+        ) from exc
+
+    if timeout_seconds <= 0:
+        raise ValueError(
+            "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS must be a positive integer number of seconds."
+        )
+    return timeout_seconds
+
+
 def _fmt_ts(ms: int | None) -> str:
     """Convert epoch milliseconds to a human-readable UTC string."""
     if ms is None:
@@ -49,6 +80,51 @@ def _fmt_ts(ms: int | None) -> str:
 
 
 # ─── Jobs ────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def query_sql(
+    query: str,
+    catalog: str = "",
+    schema: str = "",
+) -> dict[str, Any]:
+    """
+    Execute a single read-only SQL query against the configured Databricks SQL warehouse.
+
+    Args:
+        query: A single SELECT statement. WITH CTEs are supported.
+        catalog: Optional default catalog for statement execution.
+        schema: Optional default schema for statement execution.
+
+    Returns:
+        JSON-digestible query results or a JSON-digestible error payload.
+    """
+    try:
+        warehouse_id = _get_warehouse_id()
+        poll_timeout_seconds = _get_sql_poll_timeout_seconds()
+        client = _get_client()
+        return execute_safe_query(
+            warehouse_id=warehouse_id,
+            client=client,
+            query=query,
+            catalog=catalog or None,
+            schema=schema or None,
+            poll_timeout_seconds=poll_timeout_seconds,
+        )
+    except QueryValidationError as exc:
+        return exc.as_dict()
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "error_type": "configuration_error",
+            "message": str(exc),
+        }
+    except DatabricksError as exc:
+        return {
+            "status": "error",
+            "error_type": "databricks_api_error",
+            "message": str(exc),
+        }
 
 
 @mcp.tool()

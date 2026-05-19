@@ -17,7 +17,11 @@ from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
 from databricks.sdk.service.pipelines import PipelineState
 from mcp.server.fastmcp import FastMCP
 
-from databricks_mcp.sql_query import QueryValidationError, execute_safe_query
+from databricks_mcp.sql_query import (
+    QueryValidationError,
+    DEFAULT_SQL_POLL_TIMEOUT_SECONDS,
+    execute_safe_query,
+)
 
 load_dotenv()
 
@@ -62,7 +66,7 @@ def _get_env_value(name: str) -> str | None:
 
 def _parse_positive_int_env(name: str, value: str | None) -> int:
     if not value:
-        return 120
+        return DEFAULT_SQL_POLL_TIMEOUT_SECONDS
 
     try:
         parsed_value = int(value)
@@ -154,6 +158,14 @@ def _get_sql_poll_timeout_seconds(profile: str = "") -> int:
     return _get_workspace_config(profile).sql_poll_timeout_seconds
 
 
+def _parse_positive_poll_timeout_override(poll_timeout_seconds: int | None) -> int | None:
+    if poll_timeout_seconds is None:
+        return None
+    if poll_timeout_seconds <= 0:
+        raise ValueError("poll_timeout_seconds must be a positive integer number of seconds.")
+    return poll_timeout_seconds
+
+
 def _fmt_ts(ms: int | None) -> str:
     """Convert epoch milliseconds to a human-readable UTC string."""
     if ms is None:
@@ -170,6 +182,7 @@ def query_sql(
     catalog: str = "",
     schema: str = "",
     profile: str = "",
+    poll_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     """
     Execute a single read-only SQL query against the configured Databricks SQL warehouse.
@@ -181,13 +194,17 @@ def query_sql(
         profile: Optional Databricks profile name. When set, the tool reads
                  DATABRICKS_PROFILE_<PROFILE>_* values from .env and uses the
                  same profile for SDK authentication.
+        poll_timeout_seconds: Optional per-request override for query polling.
+                 Must be a positive integer when set.
 
     Returns:
         JSON-digestible query results or a JSON-digestible error payload.
     """
     try:
         warehouse_id = _get_warehouse_id(profile)
-        poll_timeout_seconds = _get_sql_poll_timeout_seconds(profile)
+        resolved_poll_timeout_seconds = _parse_positive_poll_timeout_override(poll_timeout_seconds)
+        if resolved_poll_timeout_seconds is None:
+            resolved_poll_timeout_seconds = _get_sql_poll_timeout_seconds(profile)
         client = _get_client(profile)
         return execute_safe_query(
             warehouse_id=warehouse_id,
@@ -195,7 +212,7 @@ def query_sql(
             query=query,
             catalog=catalog or None,
             schema=schema or None,
-            poll_timeout_seconds=poll_timeout_seconds,
+            poll_timeout_seconds=resolved_poll_timeout_seconds,
         )
     except QueryValidationError as exc:
         return exc.as_dict()

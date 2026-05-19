@@ -313,6 +313,23 @@ class QuerySqlToolTests(unittest.TestCase):
             profile="analytics",
         )
 
+    def test_profile_name_normalization_uses_expected_env_keys(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DATABRICKS_PROFILE_PROD_WEST_HOST": "https://prod-west.example.com",
+                "DATABRICKS_PROFILE_PROD_WEST_WAREHOUSE_ID": "warehouse-prod-west",
+            },
+            clear=True,
+        ):
+            with patch("databricks_mcp.server._get_client", return_value=MagicMock()) as get_client:
+                with patch("databricks_mcp.server.execute_safe_query", return_value={"status": "ok"}) as execute:
+                    result = server.query_sql("SELECT 1", profile="prod-west")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(execute.call_args.kwargs["warehouse_id"], "warehouse-prod-west")
+        get_client.assert_called_once_with("prod-west")
+
     def test_returns_configuration_errors_as_json(self) -> None:
         with patch.dict(os.environ, {"DATABRICKS_HOST": "https://example.com"}, clear=True):
             result = server.query_sql("SELECT 1")
@@ -356,6 +373,42 @@ class QuerySqlToolTests(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs["warehouse_id"], "warehouse-analytics")
         self.assertEqual(execute.call_args.kwargs["poll_timeout_seconds"], 45)
         get_client.assert_called_once_with("analytics")
+
+    def test_per_request_poll_timeout_override_takes_precedence(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DATABRICKS_PROFILE_ANALYTICS_HOST": "https://analytics.example.com",
+                "DATABRICKS_PROFILE_ANALYTICS_WAREHOUSE_ID": "warehouse-analytics",
+                "DATABRICKS_PROFILE_ANALYTICS_SQL_POLL_TIMEOUT_SECONDS": "45",
+            },
+            clear=True,
+        ):
+            with patch("databricks_mcp.server._get_client", return_value=MagicMock()):
+                with patch("databricks_mcp.server.execute_safe_query", return_value={"status": "ok"}) as execute:
+                    result = server.query_sql(
+                        "SELECT 1",
+                        profile="analytics",
+                        poll_timeout_seconds=30,
+                    )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(execute.call_args.kwargs["poll_timeout_seconds"], 30)
+
+    def test_rejects_non_positive_per_request_poll_timeout_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DATABRICKS_HOST": "https://example.com",
+                "DATABRICKS_WAREHOUSE_ID": "warehouse-123",
+            },
+            clear=True,
+        ):
+            result = server.query_sql("SELECT 1", poll_timeout_seconds=0)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "configuration_error")
+        self.assertIn("poll_timeout_seconds", result["message"])
 
     def test_profile_uses_default_poll_timeout_when_profile_timeout_is_missing(self) -> None:
         with patch.dict(

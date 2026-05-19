@@ -110,7 +110,7 @@ settings.
 | `uv: command not found` | Replace `"command": "uv"` in `mcp.json` with the output of `which uv` |
 | Auth error | Run `databricks auth login --host <your-host>` or `databricks auth login --host <your-host> --profile <profile>` and ensure `DATABRICKS_HOST` or `DATABRICKS_PROFILE_<PROFILE>_HOST` in `.env` has `https://` |
 | SQL query tool returns configuration error | Set `DATABRICKS_WAREHOUSE_ID` to the serverless warehouse used for statement execution |
-| SQL query polling needs more or less time | Set `DATABRICKS_SQL_POLL_TIMEOUT_SECONDS` to the desired limit in seconds; default is 120 |
+| SQL query polling needs more or less time | Set `DATABRICKS_SQL_POLL_TIMEOUT_SECONDS` (or profile-specific timeout env vars) to the desired limit in seconds; `query_sql` also supports per-request `poll_timeout_seconds`; default is 120 |
 
 ---
 

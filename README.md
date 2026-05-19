@@ -33,6 +33,11 @@ Browse and operate Databricks Jobs, Delta Live Tables pipelines, and Unity Catal
 | `search_tables` | Find tables by name pattern across catalogs |
 | `search_columns` | Find which tables contain a column by name |
 
+### SQL
+| Tool | Description |
+|------|-------------|
+| `query_sql` | Execute a single sanitized read-only `SELECT` / `WITH ... SELECT` query on the configured SQL warehouse |
+
 ---
 
 ## Setup
@@ -63,6 +68,8 @@ No token stored in files. The SDK picks up the OAuth session automatically.
 cp .env.example .env
 # Edit .env and set:
 # DATABRICKS_HOST=https://adb-xxx.azuredatabricks.net
+# DATABRICKS_WAREHOUSE_ID=<serverless-sql-warehouse-id>
+# Optional: DATABRICKS_SQL_POLL_TIMEOUT_SECONDS=120
 ```
 
 ---
@@ -88,6 +95,8 @@ cp .env.example .env
 | Server not discovered | Open the *folder*, not a single file — `.vscode/mcp.json` must be at workspace root |
 | `uv: command not found` | Replace `"command": "uv"` in `mcp.json` with the output of `which uv` |
 | Auth error | Run `databricks auth login --host <your-host>` and ensure `DATABRICKS_HOST` in `.env` has `https://` |
+| SQL query tool returns configuration error | Set `DATABRICKS_WAREHOUSE_ID` to the serverless warehouse used for statement execution |
+| SQL query polling needs more or less time | Set `DATABRICKS_SQL_POLL_TIMEOUT_SECONDS` to the desired limit in seconds; default is 120 |
 
 ---
 
@@ -129,6 +138,15 @@ Where can I find a column called customer_id?
 Show me all columns and types for main.sales.orders
 ```
 
+### SQL
+
+```
+Run a read-only query for the latest 25 orders in main.sales
+```
+```
+Use query_sql to select customer_id, order_id, and order_total from sales.orders where order_date = '2026-05-01'
+```
+
 ### Bootstrap Retry Agent
 
 Paste this into Copilot Chat (Agent mode) to auto-detect and rerun bootstrap-failed jobs:
@@ -160,10 +178,13 @@ Do the same but DO NOT call run_job — only tell me which jobs you would rerun 
 ```
 databricks-mcp-server/
 ├── src/databricks_mcp/
-│   └── server.py          # All MCP tools
+│   ├── server.py          # MCP tools
+│   └── sql_query.py       # Read-only SQL sanitization and statement execution
 ├── .vscode/
 │   ├── mcp.json           # VS Code MCP server config (auto-discovered)
 │   └── settings.json      # Enables MCP in Copilot Chat
 ├── .env.example           # Copy to .env and set DATABRICKS_HOST
+├── tests/
+│   └── test_sql_query.py  # Unit tests for safe SQL querying
 └── pyproject.toml
 ```

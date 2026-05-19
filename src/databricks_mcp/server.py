@@ -5,6 +5,8 @@ Exposes Databricks Jobs and Delta Live Tables (Pipelines) as MCP tools.
 """
 
 import os
+import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -29,47 +31,127 @@ mcp = FastMCP(
 )
 
 
-def _get_client() -> WorkspaceClient:
-    # The SDK resolves credentials automatically in this order:
-    #   1. DATABRICKS_HOST + DATABRICKS_TOKEN env vars (PAT fallback)
-    #   2. OAuth U2M token stored by `databricks auth login` (~/.databrickscfg)
-    #   3. Azure CLI / GCP ADC / AWS instance profile (cloud environments)
-    # For local development, just run:  databricks auth login --host <workspace-url>
-    host = os.environ.get("DATABRICKS_HOST")
+@dataclass(frozen=True)
+class WorkspaceConfig:
+    host: str
+    warehouse_id: str | None
+    sql_poll_timeout_seconds: int
+    profile: str | None
+
+
+def _resolve_profile(profile: str = "") -> str | None:
+    normalized_profile = profile.strip()
+    if not normalized_profile:
+        return None
+    if not re.search(r"[A-Za-z0-9]", normalized_profile):
+        raise ValueError("profile must contain at least one letter or number.")
+    return normalized_profile
+
+
+def _profile_env_prefix(profile: str) -> str:
+    normalized_profile = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
+    if not normalized_profile:
+        raise ValueError("profile must contain at least one letter or number.")
+    return f"DATABRICKS_PROFILE_{normalized_profile}"
+
+
+def _get_env_value(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
+def _parse_positive_int_env(name: str, value: str | None) -> int:
+    if not value:
+        return 120
+
+    try:
+        parsed_value = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer number of seconds."
+        ) from exc
+
+    if parsed_value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer number of seconds."
+        )
+    return parsed_value
+
+
+def _get_workspace_config(profile: str = "") -> WorkspaceConfig:
+    resolved_profile = _resolve_profile(profile)
+    if resolved_profile is None:
+        host = _get_env_value("DATABRICKS_HOST")
+        if not host:
+            raise ValueError(
+                "DATABRICKS_HOST must be set (e.g. https://adb-xxx.azuredatabricks.net). "
+                "Authenticate with: databricks auth login --host <workspace-url>"
+            )
+        return WorkspaceConfig(
+            host=host,
+            warehouse_id=_get_env_value("DATABRICKS_WAREHOUSE_ID"),
+            sql_poll_timeout_seconds=_parse_positive_int_env(
+                "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS",
+                _get_env_value("DATABRICKS_SQL_POLL_TIMEOUT_SECONDS"),
+            ),
+            profile=None,
+        )
+
+    env_prefix = _profile_env_prefix(resolved_profile)
+    host_key = f"{env_prefix}_HOST"
+    warehouse_id_key = f"{env_prefix}_WAREHOUSE_ID"
+    timeout_key = f"{env_prefix}_SQL_POLL_TIMEOUT_SECONDS"
+
+    host = _get_env_value(host_key)
     if not host:
         raise ValueError(
-            "DATABRICKS_HOST must be set (e.g. https://adb-xxx.azuredatabricks.net). "
-            "Authenticate with: databricks auth login --host <workspace-url>"
+            f"{host_key} must be set when profile='{resolved_profile}'."
         )
-    return WorkspaceClient(host=host)
+
+    timeout_value = _get_env_value(timeout_key)
+    if timeout_value is None:
+        timeout_key = "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS"
+        timeout_value = _get_env_value(timeout_key)
+
+    return WorkspaceConfig(
+        host=host,
+        warehouse_id=_get_env_value(warehouse_id_key) or _get_env_value("DATABRICKS_WAREHOUSE_ID"),
+        sql_poll_timeout_seconds=_parse_positive_int_env(timeout_key, timeout_value),
+        profile=resolved_profile,
+    )
 
 
-def _get_warehouse_id() -> str:
-    warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID")
+def _get_client(profile: str = "") -> WorkspaceClient:
+    # The SDK resolves credentials automatically in this order:
+    #   1. DATABRICKS_HOST + DATABRICKS_TOKEN env vars (PAT fallback)
+    #   2. OAuth U2M token stored by `databricks auth login` (~/.databrickscfg),
+    #      optionally scoped by the provided profile name
+    #   3. Azure CLI / GCP ADC / AWS instance profile (cloud environments)
+    # For local development, just run:  databricks auth login --host <workspace-url>
+    workspace_config = _get_workspace_config(profile)
+    client_kwargs: dict[str, str] = {"host": workspace_config.host}
+    if workspace_config.profile:
+        client_kwargs["profile"] = workspace_config.profile
+    return WorkspaceClient(**client_kwargs)
+
+
+def _get_warehouse_id(profile: str = "") -> str:
+    workspace_config = _get_workspace_config(profile)
+    warehouse_id = workspace_config.warehouse_id
     if not warehouse_id:
+        if workspace_config.profile:
+            profile_warehouse_key = f"{_profile_env_prefix(workspace_config.profile)}_WAREHOUSE_ID"
+            raise ValueError(
+                f"{profile_warehouse_key} or DATABRICKS_WAREHOUSE_ID must be set to the serverless SQL warehouse to use for read-only queries."
+            )
         raise ValueError(
             "DATABRICKS_WAREHOUSE_ID must be set to the serverless SQL warehouse to use for read-only queries."
         )
     return warehouse_id
 
 
-def _get_sql_poll_timeout_seconds() -> int:
-    value = os.environ.get("DATABRICKS_SQL_POLL_TIMEOUT_SECONDS", "").strip()
-    if not value:
-        return 120
-
-    try:
-        timeout_seconds = int(value)
-    except ValueError as exc:
-        raise ValueError(
-            "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS must be a positive integer number of seconds."
-        ) from exc
-
-    if timeout_seconds <= 0:
-        raise ValueError(
-            "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS must be a positive integer number of seconds."
-        )
-    return timeout_seconds
+def _get_sql_poll_timeout_seconds(profile: str = "") -> int:
+    return _get_workspace_config(profile).sql_poll_timeout_seconds
 
 
 def _fmt_ts(ms: int | None) -> str:
@@ -87,6 +169,7 @@ def query_sql(
     query: str,
     catalog: str = "",
     schema: str = "",
+    profile: str = "",
 ) -> dict[str, Any]:
     """
     Execute a single read-only SQL query against the configured Databricks SQL warehouse.
@@ -95,14 +178,17 @@ def query_sql(
         query: A single SELECT statement. WITH CTEs are supported.
         catalog: Optional default catalog for statement execution.
         schema: Optional default schema for statement execution.
+        profile: Optional Databricks profile name. When set, the tool reads
+                 DATABRICKS_PROFILE_<PROFILE>_* values from .env and uses the
+                 same profile for SDK authentication.
 
     Returns:
         JSON-digestible query results or a JSON-digestible error payload.
     """
     try:
-        warehouse_id = _get_warehouse_id()
-        poll_timeout_seconds = _get_sql_poll_timeout_seconds()
-        client = _get_client()
+        warehouse_id = _get_warehouse_id(profile)
+        poll_timeout_seconds = _get_sql_poll_timeout_seconds(profile)
+        client = _get_client(profile)
         return execute_safe_query(
             warehouse_id=warehouse_id,
             client=client,
@@ -128,17 +214,18 @@ def query_sql(
 
 
 @mcp.tool()
-def list_jobs(name_filter: str = "") -> list[dict[str, Any]]:
+def list_jobs(name_filter: str = "", profile: str = "") -> list[dict[str, Any]]:
     """
     List all Databricks jobs in the workspace.
 
     Args:
         name_filter: Optional substring to filter jobs by name (case-insensitive).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of jobs with id, name, creator, created_time, and schedule info.
     """
-    client = _get_client()
+    client = _get_client(profile)
     results = []
     for job in client.jobs.list(expand_tasks=False):
         name = job.settings.name or ""
@@ -164,17 +251,18 @@ def list_jobs(name_filter: str = "") -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_job(job_id: int) -> dict[str, Any]:
+def get_job(job_id: int, profile: str = "") -> dict[str, Any]:
     """
     Get detailed information about a specific Databricks job.
 
     Args:
         job_id: The numeric job ID.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Full job configuration including tasks, clusters, schedule, and parameters.
     """
-    client = _get_client()
+    client = _get_client(profile)
     job = client.jobs.get(job_id)
     settings = job.settings
 
@@ -219,6 +307,7 @@ def list_job_runs(
     job_id: int,
     limit: int = 20,
     active_only: bool = False,
+    profile: str = "",
 ) -> list[dict[str, Any]]:
     """
     List recent runs for a Databricks job.
@@ -227,11 +316,12 @@ def list_job_runs(
         job_id: The numeric job ID.
         limit: Maximum number of runs to return (default 20, max 100).
         active_only: If True, only return currently active/running runs.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of runs with run_id, state, result, start/end times, and duration.
     """
-    client = _get_client()
+    client = _get_client(profile)
     limit = min(limit, 100)
     results = []
     for run in client.jobs.list_runs(job_id=job_id, active_only=active_only, limit=limit):
@@ -259,17 +349,18 @@ def list_job_runs(
 
 
 @mcp.tool()
-def get_job_run(run_id: int) -> dict[str, Any]:
+def get_job_run(run_id: int, profile: str = "") -> dict[str, Any]:
     """
     Get detailed information about a specific job run, including per-task status.
 
     Args:
         run_id: The numeric run ID.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Run details with overall state, task states, error messages, and URLs.
     """
-    client = _get_client()
+    client = _get_client(profile)
     run = client.jobs.get_run(run_id)
     state = run.state
 
@@ -307,33 +398,35 @@ def get_job_run(run_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
-def cancel_job_run(run_id: int) -> dict[str, str]:
+def cancel_job_run(run_id: int, profile: str = "") -> dict[str, str]:
     """
     Cancel an active Databricks job run.
 
     Args:
         run_id: The numeric run ID to cancel.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Confirmation message.
     """
-    client = _get_client()
+    client = _get_client(profile)
     client.jobs.cancel_run(run_id)
     return {"status": "cancel requested", "run_id": str(run_id)}
 
 
 @mcp.tool()
-def run_job(job_id: int) -> dict[str, Any]:
+def run_job(job_id: int, profile: str = "") -> dict[str, Any]:
     """
     Trigger a new run of a Databricks job.
 
     Args:
         job_id: The numeric job ID to run.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         The new run_id and a link to the run page.
     """
-    client = _get_client()
+    client = _get_client(profile)
     response = client.jobs.run_now(job_id=job_id)
     run = response.result()
     return {
@@ -347,17 +440,18 @@ def run_job(job_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
-def list_pipelines(name_filter: str = "") -> list[dict[str, Any]]:
+def list_pipelines(name_filter: str = "", profile: str = "") -> list[dict[str, Any]]:
     """
     List all Delta Live Tables (DLT) pipelines in the workspace.
 
     Args:
         name_filter: Optional substring to filter pipelines by name (case-insensitive).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of pipelines with id, name, state, creator, and cluster spec summary.
     """
-    client = _get_client()
+    client = _get_client(profile)
     results = []
     for p in client.pipelines.list_pipelines():
         name = p.name or ""
@@ -377,17 +471,18 @@ def list_pipelines(name_filter: str = "") -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_pipeline(pipeline_id: str) -> dict[str, Any]:
+def get_pipeline(pipeline_id: str, profile: str = "") -> dict[str, Any]:
     """
     Get detailed information about a Delta Live Tables pipeline.
 
     Args:
         pipeline_id: The pipeline UUID.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Pipeline configuration including state, clusters, libraries, and last update.
     """
-    client = _get_client()
+    client = _get_client(profile)
     p = client.pipelines.get(pipeline_id)
     spec = p.spec or {}
 
@@ -440,6 +535,7 @@ def get_pipeline(pipeline_id: str) -> dict[str, Any]:
 def list_pipeline_updates(
     pipeline_id: str,
     limit: int = 10,
+    profile: str = "",
 ) -> list[dict[str, Any]]:
     """
     List recent update runs for a Delta Live Tables pipeline.
@@ -447,11 +543,12 @@ def list_pipeline_updates(
     Args:
         pipeline_id: The pipeline UUID.
         limit: Maximum number of updates to return (default 10).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of pipeline updates with update_id, state, cause, and timing.
     """
-    client = _get_client()
+    client = _get_client(profile)
     response = client.pipelines.list_updates(pipeline_id=pipeline_id, max_results=limit)
     results = []
     for u in response.updates or []:
@@ -468,18 +565,19 @@ def list_pipeline_updates(
 
 
 @mcp.tool()
-def get_pipeline_update(pipeline_id: str, update_id: str) -> dict[str, Any]:
+def get_pipeline_update(pipeline_id: str, update_id: str, profile: str = "") -> dict[str, Any]:
     """
     Get details about a specific Delta Live Tables pipeline update, including events/errors.
 
     Args:
         pipeline_id: The pipeline UUID.
         update_id: The update UUID.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Update state and the most recent pipeline events (errors, warnings, info).
     """
-    client = _get_client()
+    client = _get_client(profile)
     update = client.pipelines.get_update(pipeline_id=pipeline_id, update_id=update_id)
     u = update.update
 
@@ -517,18 +615,23 @@ def get_pipeline_update(pipeline_id: str, update_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def start_pipeline_update(pipeline_id: str, full_refresh: bool = False) -> dict[str, str]:
+def start_pipeline_update(
+    pipeline_id: str,
+    full_refresh: bool = False,
+    profile: str = "",
+) -> dict[str, str]:
     """
     Trigger a new update (run) for a Delta Live Tables pipeline.
 
     Args:
         pipeline_id: The pipeline UUID.
         full_refresh: If True, recompute all data from scratch (default False).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         The new update_id.
     """
-    client = _get_client()
+    client = _get_client(profile)
     response = client.pipelines.start_update(
         pipeline_id=pipeline_id,
         full_refresh=full_refresh,
@@ -540,14 +643,17 @@ def start_pipeline_update(pipeline_id: str, full_refresh: bool = False) -> dict[
 
 
 @mcp.tool()
-def list_catalogs() -> list[dict[str, Any]]:
+def list_catalogs(profile: str = "") -> list[dict[str, Any]]:
     """
     List all Unity Catalog catalogs in the workspace.
+
+    Args:
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of catalogs with name, type, owner, and comment.
     """
-    client = _get_client()
+    client = _get_client(profile)
     return [
         {
             "name": c.name,
@@ -560,17 +666,18 @@ def list_catalogs() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def list_schemas(catalog_name: str) -> list[dict[str, Any]]:
+def list_schemas(catalog_name: str, profile: str = "") -> list[dict[str, Any]]:
     """
     List all schemas (databases) inside a Unity Catalog catalog.
 
     Args:
         catalog_name: Name of the catalog (e.g. "main", "hive_metastore").
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of schemas with name, owner, and full_name.
     """
-    client = _get_client()
+    client = _get_client(profile)
     return [
         {
             "name": s.name,
@@ -587,6 +694,7 @@ def list_tables(
     catalog_name: str,
     schema_name: str,
     name_filter: str = "",
+    profile: str = "",
 ) -> list[dict[str, Any]]:
     """
     List all tables and views in a schema.
@@ -595,11 +703,12 @@ def list_tables(
         catalog_name: Catalog name (e.g. "main").
         schema_name: Schema name (e.g. "default").
         name_filter: Optional substring to filter table names (case-insensitive).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of tables with full_name, table_type, owner, and column count.
     """
-    client = _get_client()
+    client = _get_client(profile)
     results = []
     for t in client.tables.list(catalog_name=catalog_name, schema_name=schema_name):
         if name_filter and name_filter.lower() not in (t.name or "").lower():
@@ -619,19 +728,20 @@ def list_tables(
 
 
 @mcp.tool()
-def get_table(full_table_name: str) -> dict[str, Any]:
+def get_table(full_table_name: str, profile: str = "") -> dict[str, Any]:
     """
     Get full metadata for a table including all columns, types, and comments.
 
     Args:
         full_table_name: Three-part name: catalog.schema.table
                          (e.g. "main.sales.orders").
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Table metadata with columns (name, type, nullable, comment), owner,
         storage location, and table properties.
     """
-    client = _get_client()
+    client = _get_client(profile)
     t = client.tables.get(full_name=full_table_name)
     return {
         "name": t.name,
@@ -661,6 +771,7 @@ def get_table(full_table_name: str) -> dict[str, Any]:
 def search_tables(
     name_pattern: str,
     catalog_name: str = "",
+    profile: str = "",
 ) -> list[dict[str, Any]]:
     """
     Search for tables whose name contains a given pattern, across all (or one) catalog.
@@ -669,11 +780,12 @@ def search_tables(
     Args:
         name_pattern: Substring to match against table names (case-insensitive).
         catalog_name: Restrict search to this catalog. Searches all catalogs if empty.
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         Matching tables with full_name, table_type, owner, and column count.
     """
-    client = _get_client()
+    client = _get_client(profile)
 
     catalogs = (
         [type("C", (), {"name": catalog_name})]
@@ -712,6 +824,7 @@ def search_columns(
     column_name_pattern: str,
     catalog_name: str = "",
     schema_name: str = "",
+    profile: str = "",
 ) -> list[dict[str, Any]]:
     """
     Find all tables that contain a column matching the given name pattern.
@@ -722,11 +835,12 @@ def search_columns(
         column_name_pattern: Substring to match against column names (case-insensitive).
         catalog_name: Restrict search to this catalog. Searches all catalogs if empty.
         schema_name: Restrict search to this schema (requires catalog_name if set).
+        profile: Optional Databricks profile name for workspace selection.
 
     Returns:
         List of matches with table full_name, column name, type, and comment.
     """
-    client = _get_client()
+    client = _get_client(profile)
 
     # Build the list of (catalog, schema) pairs to search
     search_scope: list[tuple[str, str]] = []

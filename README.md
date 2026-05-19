@@ -58,6 +58,9 @@ brew install databricks
 
 # Login — opens browser, stores token in ~/.databrickscfg
 databricks auth login --host https://adb-xxx.azuredatabricks.net
+
+# Optional: login with a named profile for multi-workspace setups
+databricks auth login --host https://adb-xxx.azuredatabricks.net --profile prod-west
 ```
 
 No token stored in files. The SDK picks up the OAuth session automatically.
@@ -71,6 +74,17 @@ cp .env.example .env
 # DATABRICKS_WAREHOUSE_ID=<serverless-sql-warehouse-id>
 # Optional: DATABRICKS_SQL_POLL_TIMEOUT_SECONDS=120
 ```
+
+To configure multiple workspaces in the same `.env`, add named entries using
+`DATABRICKS_PROFILE_<PROFILE>_*` keys. For example, `profile="prod-west"`
+maps to `DATABRICKS_PROFILE_PROD_WEST_HOST` and
+`DATABRICKS_PROFILE_PROD_WEST_WAREHOUSE_ID`, and optional profile-specific poll
+timeouts can be set with `DATABRICKS_PROFILE_PROD_WEST_SQL_POLL_TIMEOUT_SECONDS`.
+If a profile-specific poll timeout is not set, `query_sql` falls back to
+`DATABRICKS_SQL_POLL_TIMEOUT_SECONDS`, then to 120 seconds.
+
+If you omit `profile`, tools keep using the existing default `DATABRICKS_*`
+settings.
 
 ---
 
@@ -94,7 +108,7 @@ cp .env.example .env
 |---------|-----|
 | Server not discovered | Open the *folder*, not a single file — `.vscode/mcp.json` must be at workspace root |
 | `uv: command not found` | Replace `"command": "uv"` in `mcp.json` with the output of `which uv` |
-| Auth error | Run `databricks auth login --host <your-host>` and ensure `DATABRICKS_HOST` in `.env` has `https://` |
+| Auth error | Run `databricks auth login --host <your-host>` or `databricks auth login --host <your-host> --profile <profile>` and ensure `DATABRICKS_HOST` or `DATABRICKS_PROFILE_<PROFILE>_HOST` in `.env` has `https://` |
 | SQL query tool returns configuration error | Set `DATABRICKS_WAREHOUSE_ID` to the serverless warehouse used for statement execution |
 | SQL query polling needs more or less time | Set `DATABRICKS_SQL_POLL_TIMEOUT_SECONDS` to the desired limit in seconds; default is 120 |
 

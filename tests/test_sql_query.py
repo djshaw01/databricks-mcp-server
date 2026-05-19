@@ -113,9 +113,30 @@ class PrepareSafeQueryTests(unittest.TestCase):
         self.assertIn("semicolon", str(ctx.exception).lower())
         self.assertTrue(ctx.exception.recommendations)
 
+    def test_rejects_queries_without_parseable_statement(self) -> None:
+        with self.assertRaises(QueryValidationError) as ctx:
+            prepare_safe_query("-- no statement here")
+
+        self.assertIn("no sql statement was found", str(ctx.exception).lower())
+        self.assertNotIn("semicolon", str(ctx.exception).lower())
+
     def test_rejects_non_select_statements(self) -> None:
         with self.assertRaises(QueryValidationError):
             prepare_safe_query("DELETE FROM sales.orders WHERE order_id = 42")
+
+    def test_parameterizes_boolean_and_null_literals(self) -> None:
+        prepared = prepare_safe_query(
+            "SELECT * FROM sales.orders WHERE is_active = TRUE AND is_deleted = FALSE AND archived_at IS NULL"
+        )
+
+        self.assertEqual(
+            [parameter.value for parameter in prepared.parameters],
+            ["TRUE", "FALSE", None],
+        )
+        self.assertEqual(
+            [parameter.type for parameter in prepared.parameters],
+            ["BOOLEAN", "BOOLEAN", None],
+        )
 
 
 class ExecuteSafeQueryTests(unittest.TestCase):
@@ -185,6 +206,30 @@ class ExecuteSafeQueryTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["rows"], [{"answer": "1"}])
         self.assertEqual(client.statement_execution.get_statement.call_count, 2)
+
+    def test_polls_immediately_before_sleeping(self) -> None:
+        client = MagicMock()
+        client.statement_execution.execute_statement.return_value = _statement_response(
+            state=StatementState.RUNNING,
+        )
+        client.statement_execution.get_statement.return_value = _statement_response(
+            state=StatementState.SUCCEEDED,
+            columns=[("answer", ColumnInfoTypeName.INT)],
+            rows=[["1"]],
+        )
+
+        monotonic_values = iter([0.0])
+        with patch("databricks_mcp.sql_query.time.monotonic", side_effect=lambda: next(monotonic_values)):
+            with patch("databricks_mcp.sql_query.time.sleep", return_value=None) as sleep:
+                result = execute_safe_query(
+                    client=client,
+                    warehouse_id="warehouse-123",
+                    query="SELECT 1 AS answer",
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(client.statement_execution.get_statement.call_count, 1)
+        sleep.assert_not_called()
 
     def test_cancels_statement_after_two_minutes_of_polling(self) -> None:
         client = MagicMock()

@@ -73,6 +73,15 @@ def prepare_safe_query(query: str) -> PreparedQuery:
             ],
         ) from exc
 
+    if not statements:
+        raise QueryValidationError(
+            "No SQL statement was found. Provide a single SELECT query with actual SQL text.",
+            recommendations=[
+                "Submit exactly one SELECT statement without a trailing semicolon.",
+                "If you included only comments, add the SELECT statement after the comments.",
+            ],
+        )
+
     if len(statements) != 1 or cleaned_query.rstrip().endswith(";"):
         raise QueryValidationError(
             "Semicolons and multi-statement SQL are not allowed because they can hide SQL injection attempts.",
@@ -85,7 +94,16 @@ def prepare_safe_query(query: str) -> PreparedQuery:
         )
 
     expression = statements[0]
-    if expression is None or not isinstance(expression, exp.Query):
+    if expression is None:
+        raise QueryValidationError(
+            "No SQL statement was found. Provide a single SELECT query with actual SQL text.",
+            recommendations=[
+                "Submit exactly one SELECT statement without a trailing semicolon.",
+                "If you included only comments, add the SELECT statement after the comments.",
+            ],
+        )
+
+    if not isinstance(expression, exp.Query):
         raise QueryValidationError(
             "Only SELECT statements are allowed. WITH clauses are supported when they resolve to a SELECT query.",
             error_type="unsafe_query",
@@ -159,6 +177,10 @@ def _poll_for_completion(
 
     deadline = time.monotonic() + poll_timeout_seconds
     while True:
+        response = statement_execution.get_statement(statement_id)
+        if _get_state(response) not in {StatementState.PENDING, StatementState.RUNNING}:
+            return response
+
         if time.monotonic() >= deadline:
             statement_execution.cancel_execution(statement_id)
             return {
@@ -172,9 +194,6 @@ def _poll_for_completion(
             }
 
         time.sleep(_POLL_INTERVAL_SECONDS)
-        response = statement_execution.get_statement(statement_id)
-        if _get_state(response) not in {StatementState.PENDING, StatementState.RUNNING}:
-            return response
 
 
 def _success_response(response: StatementResponse, sanitized_statement: str) -> dict[str, Any]:
@@ -182,7 +201,7 @@ def _success_response(response: StatementResponse, sanitized_statement: str) -> 
     column_names = []
     if response.manifest and response.manifest.schema and response.manifest.schema.columns:
         for column in response.manifest.schema.columns:
-            type_name = column.type_name.value if column.type_name else column.type_text
+            type_name = column.type_text or (column.type_name.value if column.type_name else None)
             columns.append({"name": column.name, "type": type_name})
             column_names.append(column.name or "")
 
@@ -254,7 +273,7 @@ class _LiteralParameterizer:
             return self._placeholder(value=value, value_type=value_type)
 
         if isinstance(node, exp.Boolean):
-            return self._placeholder(value=node.this.upper(), value_type="BOOLEAN")
+            return self._placeholder(value="TRUE" if node.this else "FALSE", value_type="BOOLEAN")
 
         if isinstance(node, exp.Null):
             return self._placeholder(value=None, value_type=None)

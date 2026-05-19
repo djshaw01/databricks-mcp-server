@@ -26,17 +26,17 @@ Browse and operate Databricks Jobs, Delta Live Tables pipelines, and Unity Catal
 ### Unity Catalog
 | Tool | Description |
 |------|-------------|
-| `list_catalogs` | List all catalogs in the workspace |
-| `list_schemas` | List schemas inside a catalog |
-| `list_tables` | List tables in a schema with optional name filter |
-| `get_table` | Full table metadata including all columns and types |
-| `search_tables` | Find tables by name pattern across catalogs |
-| `search_columns` | Find which tables contain a column by name |
+| `list_catalogs` | List all catalogs in the workspace (preferred for metadata discovery) |
+| `list_schemas` | List schemas inside a catalog (preferred for metadata discovery) |
+| `list_tables` | List tables in a schema with optional name filter (preferred for metadata discovery) |
+| `get_table` | Full table metadata including all columns and types (preferred for metadata discovery) |
+| `search_tables` | Find tables by name pattern across catalogs (preferred for metadata discovery) |
+| `search_columns` | Find which tables contain a column by name (preferred for metadata discovery) |
 
 ### SQL
 | Tool | Description |
 |------|-------------|
-| `query_sql` | Execute a single sanitized read-only `SELECT` / `WITH ... SELECT` query on the configured SQL warehouse |
+| `query_sql` | Execute a single sanitized read-only `SELECT` / `WITH ... SELECT` query on the configured SQL warehouse for row-level results; avoid for table/column discovery when Unity Catalog tools can answer the request |
 
 ---
 

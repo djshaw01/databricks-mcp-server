@@ -29,8 +29,10 @@ mcp = FastMCP(
     "Databricks",
     instructions=(
         "Browse and inspect Databricks jobs, job runs, Delta Live Tables pipelines, "
-        "pipeline updates, and read-only SQL queries. Use these tools to monitor "
-        "workflow status, diagnose failures, inspect data, and retrieve run details."
+        "Unity Catalog metadata, and read-only SQL queries. Prefer Unity Catalog "
+        "tools (list_catalogs/list_schemas/list_tables/get_table/search_tables/"
+        "search_columns) when finding catalogs, schemas, tables, or columns, and use "
+        "query_sql only when you need query result rows."
     ),
 )
 
@@ -186,6 +188,8 @@ def query_sql(
 ) -> dict[str, Any]:
     """
     Execute a single read-only SQL query against the configured Databricks SQL warehouse.
+    Prefer Unity Catalog metadata tools for catalog/schema/table/column discovery.
+    Use this tool for row-level data retrieval when a SQL result set is required.
 
     Args:
         query: A single SELECT statement. WITH CTEs are supported.
@@ -715,6 +719,7 @@ def list_tables(
 ) -> list[dict[str, Any]]:
     """
     List all tables and views in a schema.
+    Prefer this over query_sql for metadata discovery.
 
     Args:
         catalog_name: Catalog name (e.g. "main").
@@ -748,6 +753,7 @@ def list_tables(
 def get_table(full_table_name: str, profile: str = "") -> dict[str, Any]:
     """
     Get full metadata for a table including all columns, types, and comments.
+    Prefer this over query_sql when you need schema metadata.
 
     Args:
         full_table_name: Three-part name: catalog.schema.table
@@ -793,6 +799,7 @@ def search_tables(
     """
     Search for tables whose name contains a given pattern, across all (or one) catalog.
     Use this to answer "how many tables start with xyz" or "find tables named like xyz".
+    Prefer this over query_sql for table discovery.
 
     Args:
         name_pattern: Substring to match against table names (case-insensitive).
@@ -847,6 +854,7 @@ def search_columns(
     Find all tables that contain a column matching the given name pattern.
     Use this to answer "where can I find a column called xyz" or
     "which tables have a customer_id column".
+    Prefer this over query_sql for column discovery.
 
     Args:
         column_name_pattern: Substring to match against column names (case-insensitive).

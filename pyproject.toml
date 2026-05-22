@@ -8,14 +8,19 @@ version = "0.1.0"
 description = "MCP server for browsing Databricks jobs and pipeline runs"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.3.0",
-    "databricks-sdk>=0.20.0",
+    "fastmcp>=3.2.4,<4",
+    "databricks-sdk>=0.81.0",
     "python-dotenv>=1.0.0",
     "sqlglot>=30.8.0",
 ]
 
 [project.scripts]
 databricks-mcp = "databricks_mcp.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/databricks_mcp"]

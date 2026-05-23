@@ -38,6 +38,13 @@ Browse and operate Databricks Jobs, Delta Live Tables pipelines, and Unity Catal
 |------|-------------|
 | `query_sql` | Execute a single sanitized read-only `SELECT` / `WITH ... SELECT` query on the configured SQL warehouse for row-level results; avoid for table/column discovery when Unity Catalog tools can answer the request |
 
+### Code Execution
+| Tool | Description |
+|------|-------------|
+| `execute_code` | Execute Python/SQL on serverless workflows or Python/SQL/Scala/R on interactive clusters |
+| `list_compute` | List interactive clusters that can be targeted by `execute_code` |
+| `manage_cluster` | Get cluster status or start a terminated cluster |
+
 ---
 
 ## Setup
@@ -75,6 +82,10 @@ cp .env.example .env
 # Optional: DATABRICKS_SQL_POLL_TIMEOUT_SECONDS=120
 ```
 
+`DATABRICKS_WAREHOUSE_ID` is required for `query_sql`. It is **not** used by
+`execute_code`. Serverless code execution runs on Databricks serverless
+workflows, not on a SQL warehouse.
+
 To configure multiple workspaces in the same `.env`, add named entries using
 `DATABRICKS_PROFILE_<PROFILE>_*` keys. For example, `profile="prod-west"`
 maps to `DATABRICKS_PROFILE_PROD_WEST_HOST` and
@@ -85,6 +96,20 @@ If a profile-specific poll timeout is not set, `query_sql` falls back to
 
 If you omit `profile`, tools keep using the existing default `DATABRICKS_*`
 settings.
+
+### 4. Workspace prerequisites for code execution
+
+| Backend | Workspace / permission requirements |
+|---------|-------------------------------------|
+| `execute_code` with `compute_type="serverless"` | Databricks serverless workflows must be enabled for the workspace, and the caller must be able to submit and read Jobs runs |
+| `execute_code` with `compute_type="cluster"` | The caller must have access to an interactive cluster that supports the Command Execution API; starting a terminated cluster also requires cluster start permission |
+| `query_sql` | A configured SQL warehouse is required, but that warehouse does not satisfy the serverless workflows requirement above |
+
+If you use named profiles, authenticate that profile explicitly:
+
+```bash
+databricks auth login --host https://adb-xxx.azuredatabricks.net --profile prod-west
+```
 
 ---
 
@@ -111,10 +136,31 @@ settings.
 | Auth error | Run `databricks auth login --host <your-host>` or `databricks auth login --host <your-host> --profile <profile>` and ensure `DATABRICKS_HOST` or `DATABRICKS_PROFILE_<PROFILE>_HOST` in `.env` has `https://` |
 | SQL query tool returns configuration error | Set `DATABRICKS_WAREHOUSE_ID` to the serverless warehouse used for statement execution |
 | SQL query polling needs more or less time | Set `DATABRICKS_SQL_POLL_TIMEOUT_SECONDS` (or profile-specific timeout env vars) to the desired limit in seconds; `query_sql` also supports per-request `poll_timeout_seconds`; default is 120 |
+| `execute_code` on serverless says serverless compute is not enabled | Enable Databricks serverless workflows for the workspace and confirm the caller can submit/read Jobs runs; a SQL warehouse alone is not enough |
+| `execute_code` cannot find a cluster | Use `list_compute` to see accessible clusters, pass `cluster_id` explicitly, or start a terminated cluster with `manage_cluster(action="start", ...)` |
+| `execute_code` rejects `cluster_id` or another new argument as an extra property | Restart the MCP server in VS Code so the client refreshes the live schema |
 
 ---
 
 ## Example Copilot Prompts
+
+### Code Execution
+
+```
+Run this Python snippet with execute_code on serverless compute: print(1 + 1)
+```
+
+```
+Run this Scala snippet with execute_code on cluster 0522-121745-8myg24rm: println(42)
+```
+
+```
+Use execute_code with compute_type="cluster" and reuse the returned context_id on the next call
+```
+
+```
+List accessible interactive clusters with list_compute, then start cluster 0522-121745-8myg24rm with manage_cluster
+```
 
 ### Jobs
 
@@ -202,3 +248,78 @@ databricks-mcp-server/
 │   └── test_sql_query.py  # Unit tests for safe SQL querying
 └── pyproject.toml
 ```
+
+---
+
+## `execute_code` contract
+
+### Request fields
+
+| Field | Required | Applies to | Notes |
+|------|----------|------------|------|
+| `code` | one of `code`/`file_path` | both | Inline source to execute |
+| `file_path` | one of `code`/`file_path` | both | Local `.py`, `.sql`, `.ipynb`, `.scala`, or `.r` file |
+| `compute_type` | no | both | `auto` (default), `serverless`, or `cluster` |
+| `language` | no | both | Defaults to `python`; overridden by supported file extension |
+| `timeout` | no | both | Default `1800` for serverless, `120` for cluster |
+| `profile` | no | both | Named workspace profile from `.env` |
+| `workspace_path` | no | serverless only | Persist uploaded notebook and skip cleanup |
+| `run_name` | no | serverless only | Optional Jobs run name |
+| `cluster_id` | no | cluster only | Target interactive cluster; omitted means auto-select a running cluster |
+| `context_id` | no | cluster only | Reuse an existing command execution context |
+| `destroy_context_on_completion` | no | cluster only | Destroy the execution context after the run |
+
+### Routing rules
+
+1. `compute_type="serverless"` always uses serverless workflows.
+2. `compute_type="cluster"` always uses the Command Execution API on an interactive cluster.
+3. `compute_type="auto"` resolves to:
+   - `serverless` for Python and SQL
+   - `cluster` for Scala and R
+4. If `file_path` is provided, its extension overrides `language`.
+5. If cluster execution is selected and `cluster_id` is omitted, the server picks the best running accessible cluster by preferring names containing `shared`, then `demo`, then the first remaining running cluster.
+6. `cluster_id`, `context_id`, and `destroy_context_on_completion` are invalid for serverless execution.
+7. `workspace_path` and `run_name` are invalid for cluster execution.
+
+### Normalized response fields
+
+All `execute_code` responses include the same top-level contract:
+
+| Field | Meaning |
+|------|---------|
+| `success` | Whether execution succeeded |
+| `error` | Error text on failure, else `null` |
+| `message` | Human-readable summary |
+| `output` | Captured textual output, or `null` when none was captured |
+| `output_kind` | `text` or `none` |
+| `language` | Final execution language after file extension detection |
+| `compute_type_requested` | Original `compute_type` input |
+| `compute_type_resolved` | Actual backend used: `serverless` or `cluster` |
+
+Backend-specific fields are always present but may be `null`:
+
+| Field | Serverless | Cluster |
+|------|------------|---------|
+| `run_id` | run id | `null` |
+| `run_url` | Jobs UI URL | `null` |
+| `duration_seconds` | populated | `null` |
+| `state` | Jobs result state | `null` unless cluster error payload uses it |
+| `workspace_path` | populated when persisted | `null` |
+| `cluster_id` | `null` | cluster id |
+| `context_id` | `null` | context id |
+| `context_destroyed` | `null` | boolean |
+
+### Output semantics and current limitation
+
+- Cluster execution returns the textual result produced by the Command
+  Execution API, when one is available.
+- Serverless execution currently maps Databricks Jobs run output into the
+  `output` field by returning `notebook_output.result` and appending `logs`
+  when logs are present.
+- This server does **not** yet expose a standalone MCP tool for fetching the
+  full raw `/api/2.2/jobs/runs/get-output` payload for an existing run after
+  the fact. Today, `execute_code` only returns the normalized execution result.
+
+### Troubleshooting schema drift
+
+If an MCP client rejects newly-added fields like `cluster_id` as `additionalProperties`, restart the MCP server in VS Code so the client refreshes the live tool schema from the current source.

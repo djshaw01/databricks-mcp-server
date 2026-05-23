@@ -14,6 +14,13 @@ from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
 from databricks.sdk.service.pipelines import PipelineState
 from fastmcp import FastMCP
 
+from databricks_mcp.compute_cluster import (
+    NoRunningClusterError,
+    get_cluster_status,
+    list_clusters,
+    run_code_on_cluster,
+    start_cluster,
+)
 from databricks_mcp.compute_serverless import run_code_on_serverless
 from databricks_mcp.sql_query import (
     QueryValidationError,
@@ -36,7 +43,7 @@ mcp = FastMCP(
         "tools (list_catalogs/list_schemas/list_tables/get_table/search_tables/"
         "search_columns) when finding catalogs, schemas, tables, or columns, use "
         "query_sql only when you need query result rows, and use execute_code for "
-        "serverless code execution."
+        "Databricks code execution on serverless workflows or interactive clusters."
     ),
 )
 
@@ -44,11 +51,45 @@ _FILE_EXT_LANGUAGE = {
     ".ipynb": "python",
     ".py": "python",
     ".sql": "sql",
+    ".scala": "scala",
+    ".r": "r",
 }
 
 
 def _none_if_empty(value: str | None) -> str | None:
     return None if value == "" else value
+
+
+def _normalize_execute_code_response(
+    *,
+    result: dict[str, Any],
+    requested_compute_type: str,
+    resolved_compute_type: str,
+    language: str,
+) -> dict[str, Any]:
+    return {
+        "success": result.get("success", False),
+        "error": result.get("error"),
+        "message": result.get("message"),
+        "output": result.get("output"),
+        "output_kind": result.get("output_kind", "text" if result.get("output") else "none"),
+        "language": language,
+        "compute_type_requested": requested_compute_type,
+        "compute_type_resolved": resolved_compute_type,
+        "run_id": result.get("run_id"),
+        "run_url": result.get("run_url"),
+        "duration_seconds": result.get("duration_seconds"),
+        "state": result.get("state"),
+        "workspace_path": result.get("workspace_path"),
+        "cluster_id": result.get("cluster_id"),
+        "context_id": result.get("context_id"),
+        "context_destroyed": result.get("context_destroyed"),
+        "error_type": result.get("error_type"),
+        "available_clusters": result.get("available_clusters"),
+        "startable_clusters": result.get("startable_clusters"),
+        "skipped_clusters": result.get("skipped_clusters"),
+        "suggestions": result.get("suggestions"),
+    }
 
 def _fmt_ts(ms: int | None) -> str:
     """Convert epoch milliseconds to a human-readable UTC string."""
@@ -69,42 +110,61 @@ def execute_code(
     timeout: int | None = None,
     workspace_path: str | None = None,
     run_name: str | None = None,
+    cluster_id: str | None = None,
+    context_id: str | None = None,
+    destroy_context_on_completion: bool = False,
     profile: str = "",
 ) -> dict[str, Any]:
     """
-    Execute code on Databricks serverless compute.
+    Execute code on Databricks compute (serverless or interactive cluster).
 
-    This first phase supports serverless execution only. Cluster-backed execution
-    will be added in a later phase.
+    Routing:
+      - "serverless"  -> Databricks serverless workflows (Jobs API, notebooks)
+      - "cluster"     -> interactive cluster via Command Execution API
+      - "auto"        -> serverless for Python/SQL, cluster for Scala/R
+
+    Cluster execution supports Python, SQL, Scala, and R and can reuse a
+    returned context_id to preserve state across calls.
 
     Args:
         code: Source code to execute remotely.
-        file_path: Optional local file path (.py, .sql, .ipynb) to upload and run.
-        compute_type: "auto" and "serverless" are supported in this phase.
-        language: Execution language for inline code ("python" or "sql").
-        timeout: Optional run timeout in seconds. Defaults to 1800.
+        file_path: Optional local file path (.py, .sql, .ipynb, .scala, .r).
+        compute_type: "auto", "serverless", or "cluster".
+        language: Execution language for inline code.
+        timeout: Optional run timeout in seconds.
         workspace_path: Optional Databricks workspace path to persist the notebook.
-        run_name: Optional Jobs run name.
+                        Valid only for serverless execution.
+        run_name: Optional Jobs run name for serverless execution.
+        cluster_id: Optional interactive cluster ID for cluster execution.
+        context_id: Optional existing execution context to reuse on a cluster.
+        destroy_context_on_completion: Destroy the execution context after a cluster run.
         profile: Optional Databricks profile name for workspace selection.
 
     Returns:
-        Structured execution results including output, error, run metadata, and
-        an optional persisted workspace path.
+        A normalized result with stable top-level fields for both backends:
+        success, error, message, output, output_kind, language,
+        compute_type_requested, and compute_type_resolved.
     """
     code = _none_if_empty(code)
     file_path = _none_if_empty(file_path)
     compute_type = (_none_if_empty(compute_type) or "auto").lower()
+    requested_compute_type = compute_type
     language = (_none_if_empty(language) or "python").lower()
     workspace_path = _none_if_empty(workspace_path)
     run_name = _none_if_empty(run_name)
+    cluster_id = _none_if_empty(cluster_id)
+    context_id = _none_if_empty(context_id)
 
     if not code and not file_path:
         return {"success": False, "error": "Either 'code' or 'file_path' must be provided."}
 
-    if compute_type not in {"auto", "serverless"}:
+    if compute_type not in {"auto", "serverless", "cluster"}:
         return {
             "success": False,
-            "error": f"compute_type={compute_type!r} is not supported yet. This phase only supports serverless execution.",
+            "error": (
+                f"compute_type={compute_type!r} is not valid. "
+                "Must be 'auto', 'serverless', or 'cluster'."
+            ),
         }
 
     if file_path:
@@ -121,17 +181,72 @@ def execute_code(
         if detected_language:
             language = detected_language
 
-    resolved_timeout = timeout if timeout is not None else 1800
-    result = run_code_on_serverless(
-        code=code or "",
-        profile=profile,
-        language=language,
-        timeout=resolved_timeout,
-        run_name=run_name,
-        cleanup=workspace_path is None,
-        workspace_path=workspace_path,
-    )
-    return result.to_dict()
+    if compute_type == "auto" and language in ("scala", "r"):
+        compute_type = "cluster"
+
+    cluster_only_args_used = cluster_id is not None or context_id is not None or destroy_context_on_completion
+    serverless_only_args_used = workspace_path is not None or run_name is not None
+
+    if compute_type in ("auto", "serverless") and cluster_only_args_used:
+        return {
+            "success": False,
+            "error": (
+                "cluster_id, context_id, and destroy_context_on_completion are only valid "
+                "when compute_type resolves to 'cluster'. Use compute_type='cluster' to target a cluster."
+            ),
+        }
+
+    if compute_type == "cluster" and serverless_only_args_used:
+        return {
+            "success": False,
+            "error": (
+                "workspace_path and run_name are only valid for serverless execution. "
+                "Remove them or use compute_type='serverless'."
+            ),
+        }
+
+    if compute_type in ("auto", "serverless"):
+        resolved_timeout = timeout if timeout is not None else 1800
+        result = run_code_on_serverless(
+            code=code or "",
+            profile=profile,
+            language=language,
+            timeout=resolved_timeout,
+            run_name=run_name,
+            cleanup=workspace_path is None,
+            workspace_path=workspace_path,
+        )
+        return _normalize_execute_code_response(
+            result=result.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="serverless",
+            language=language,
+        )
+
+    resolved_timeout = timeout if timeout is not None else 120
+    try:
+        result = run_code_on_cluster(
+            code=code or "",
+            profile=profile,
+            cluster_id=cluster_id,
+            context_id=context_id,
+            language=language,
+            timeout=resolved_timeout,
+            destroy_context_on_completion=destroy_context_on_completion,
+        )
+        return _normalize_execute_code_response(
+            result=result.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+    except NoRunningClusterError as exc:
+        return _normalize_execute_code_response(
+            result=exc.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
 
 
 @mcp.tool()
@@ -857,6 +972,48 @@ def search_columns(
             pass  # skip tables with no access
 
     return matches
+
+
+@mcp.tool()
+def list_compute(
+    include_terminated: bool = False,
+    profile: str = "",
+) -> list[dict[str, Any]]:
+    """
+    List user-created interactive Databricks clusters.
+
+    Args:
+        include_terminated: When True, also include terminated and error clusters.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        List of cluster summaries with cluster_id, cluster_name, state, and creator.
+    """
+    return list_clusters(profile=profile, include_terminated=include_terminated)
+
+
+@mcp.tool()
+def manage_cluster(
+    action: str,
+    cluster_id: str,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Manage the lifecycle of an interactive Databricks cluster.
+
+    Supported actions:
+      - "status": return the current cluster state
+      - "start": start a terminated cluster
+    """
+    action = (action or "").strip().lower()
+    if action == "status":
+        return get_cluster_status(cluster_id, profile)
+    if action == "start":
+        return start_cluster(cluster_id, profile)
+    return {
+        "success": False,
+        "error": f"Unknown action {action!r}. Must be 'status' or 'start'.",
+    }
 
 
 def main():

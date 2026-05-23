@@ -30,6 +30,7 @@ _LANGUAGE_MAP = {
 class ServerlessRunResult:
     success: bool
     output: str | None = None
+    output_kind: str = "none"
     error: str | None = None
     run_id: int | None = None
     run_url: str | None = None
@@ -42,6 +43,7 @@ class ServerlessRunResult:
         result = {
             "success": self.success,
             "output": self.output,
+            "output_kind": self.output_kind,
             "error": self.error,
             "run_id": self.run_id,
             "run_url": self.run_url,
@@ -151,6 +153,7 @@ def run_code_on_serverless(
         return ServerlessRunResult(
             success=False,
             error="Code cannot be empty.",
+            output_kind="none",
             state="INVALID_INPUT",
             message="No code provided to execute.",
         )
@@ -161,6 +164,7 @@ def run_code_on_serverless(
         return ServerlessRunResult(
             success=False,
             error=f"Unsupported language: {language!r}. Must be 'python' or 'sql'.",
+            output_kind="none",
             state="INVALID_INPUT",
             message=f"Unsupported language {language!r}. Use 'python' or 'sql'.",
         )
@@ -191,6 +195,7 @@ def run_code_on_serverless(
             return ServerlessRunResult(
                 success=False,
                 error=f"Failed to upload code to workspace: {exc}",
+                output_kind="none",
                 state="UPLOAD_FAILED",
                 message=f"Could not upload notebook for execution: {exc}",
             )
@@ -235,6 +240,7 @@ def run_code_on_serverless(
             return ServerlessRunResult(
                 success=False,
                 error=f"Failed to submit serverless run: {exc}",
+                output_kind="none",
                 state="SUBMIT_FAILED",
                 message=f"Jobs API runs/submit call failed: {exc}",
                 workspace_path=workspace_path,
@@ -247,6 +253,7 @@ def run_code_on_serverless(
             return ServerlessRunResult(
                 success=False,
                 error=f"Run timed out after {timeout}s.",
+                output_kind="none",
                 run_id=run_id,
                 run_url=run_url,
                 duration_seconds=elapsed,
@@ -271,6 +278,7 @@ def run_code_on_serverless(
             return ServerlessRunResult(
                 success=False,
                 error=error_text,
+                output_kind="none",
                 run_id=run_id,
                 run_url=run_url,
                 duration_seconds=elapsed,
@@ -296,10 +304,14 @@ def run_code_on_serverless(
             error_text = output_data["error"]
 
         if is_success:
-            if not output_text:
-                output_text = "Success (no output)"
-            message = f"Code executed successfully on serverless compute in {elapsed}s."
+            output_kind = "text" if output_text else "none"
+            message = (
+                f"Code executed successfully on serverless compute in {elapsed}s."
+                if output_text
+                else f"Code executed successfully on serverless compute in {elapsed}s with no captured output."
+            )
         else:
+            output_kind = "none"
             if not error_text:
                 error_text = state_message or f"Run ended with state: {state_str}"
             message = f"Serverless run failed with state {state_str}. Check {run_url} for details."
@@ -307,6 +319,7 @@ def run_code_on_serverless(
         return ServerlessRunResult(
             success=is_success,
             output=output_text if is_success else None,
+            output_kind=output_kind,
             error=error_text if not is_success else None,
             run_id=run_id,
             run_url=run_url,

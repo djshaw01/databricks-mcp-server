@@ -101,6 +101,13 @@ def get_client(profile: str = "") -> WorkspaceClient:
     return WorkspaceClient(**client_kwargs)
 
 
+def get_current_username(profile: str = "") -> str | None:
+    try:
+        return get_client(profile).current_user.me().user_name
+    except Exception:
+        return None
+
+
 def get_warehouse_id(profile: str = "") -> str:
     workspace_config = get_workspace_config(profile)
     warehouse_id = workspace_config.warehouse_id

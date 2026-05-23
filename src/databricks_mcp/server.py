@@ -4,6 +4,7 @@ Databricks MCP Server
 Exposes Databricks Jobs and Delta Live Tables (Pipelines) as MCP tools.
 """
 
+import pathlib
 from datetime import datetime
 from typing import Any
 
@@ -13,6 +14,7 @@ from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
 from databricks.sdk.service.pipelines import PipelineState
 from fastmcp import FastMCP
 
+from databricks_mcp.compute_serverless import run_code_on_serverless
 from databricks_mcp.sql_query import (
     QueryValidationError,
     execute_safe_query,
@@ -32,10 +34,21 @@ mcp = FastMCP(
         "Browse and inspect Databricks jobs, job runs, Delta Live Tables pipelines, "
         "Unity Catalog metadata, and read-only SQL queries. Prefer Unity Catalog "
         "tools (list_catalogs/list_schemas/list_tables/get_table/search_tables/"
-        "search_columns) when finding catalogs, schemas, tables, or columns, and use "
-        "query_sql only when you need query result rows."
+        "search_columns) when finding catalogs, schemas, tables, or columns, use "
+        "query_sql only when you need query result rows, and use execute_code for "
+        "serverless code execution."
     ),
 )
+
+_FILE_EXT_LANGUAGE = {
+    ".ipynb": "python",
+    ".py": "python",
+    ".sql": "sql",
+}
+
+
+def _none_if_empty(value: str | None) -> str | None:
+    return None if value == "" else value
 
 def _fmt_ts(ms: int | None) -> str:
     """Convert epoch milliseconds to a human-readable UTC string."""
@@ -45,6 +58,80 @@ def _fmt_ts(ms: int | None) -> str:
 
 
 # ─── Jobs ────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def execute_code(
+    code: str | None = None,
+    file_path: str | None = None,
+    compute_type: str = "auto",
+    language: str = "python",
+    timeout: int | None = None,
+    workspace_path: str | None = None,
+    run_name: str | None = None,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Execute code on Databricks serverless compute.
+
+    This first phase supports serverless execution only. Cluster-backed execution
+    will be added in a later phase.
+
+    Args:
+        code: Source code to execute remotely.
+        file_path: Optional local file path (.py, .sql, .ipynb) to upload and run.
+        compute_type: "auto" and "serverless" are supported in this phase.
+        language: Execution language for inline code ("python" or "sql").
+        timeout: Optional run timeout in seconds. Defaults to 1800.
+        workspace_path: Optional Databricks workspace path to persist the notebook.
+        run_name: Optional Jobs run name.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        Structured execution results including output, error, run metadata, and
+        an optional persisted workspace path.
+    """
+    code = _none_if_empty(code)
+    file_path = _none_if_empty(file_path)
+    compute_type = (_none_if_empty(compute_type) or "auto").lower()
+    language = (_none_if_empty(language) or "python").lower()
+    workspace_path = _none_if_empty(workspace_path)
+    run_name = _none_if_empty(run_name)
+
+    if not code and not file_path:
+        return {"success": False, "error": "Either 'code' or 'file_path' must be provided."}
+
+    if compute_type not in {"auto", "serverless"}:
+        return {
+            "success": False,
+            "error": f"compute_type={compute_type!r} is not supported yet. This phase only supports serverless execution.",
+        }
+
+    if file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as source_file:
+                code = source_file.read()
+        except FileNotFoundError:
+            return {"success": False, "error": f"File not found: {file_path}"}
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to read file: {exc}"}
+
+        suffix = pathlib.Path(file_path).suffix.lower()
+        detected_language = _FILE_EXT_LANGUAGE.get(suffix)
+        if detected_language:
+            language = detected_language
+
+    resolved_timeout = timeout if timeout is not None else 1800
+    result = run_code_on_serverless(
+        code=code or "",
+        profile=profile,
+        language=language,
+        timeout=resolved_timeout,
+        run_name=run_name,
+        cleanup=workspace_path is None,
+        workspace_path=workspace_path,
+    )
+    return result.to_dict()
 
 
 @mcp.tool()

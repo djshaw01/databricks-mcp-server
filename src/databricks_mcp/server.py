@@ -11,7 +11,6 @@ from typing import Any
 from dotenv import load_dotenv
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState, ViewsToExport
-from databricks.sdk.service.pipelines import PipelineState
 from fastmcp import FastMCP
 
 from databricks_mcp.compute_cluster import (

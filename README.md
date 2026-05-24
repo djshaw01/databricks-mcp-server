@@ -303,7 +303,7 @@ databricks-mcp-server/
 | Field | Required | Applies to | Notes |
 |------|----------|------------|------|
 | `code` | one of `code`/`file_path` | both | Inline source to execute |
-| `file_path` | one of `code`/`file_path` | both | Local `.py`, `.sql`, `.ipynb`, `.scala`, or `.r` file |
+| `file_path` | one of `code`/`file_path` | both | Local `.py`, `.sql`, `.scala`, or `.r` file |
 | `compute_type` | no | both | `auto` (default), `serverless`, or `cluster` |
 | `language` | no | both | Defaults to `python`; overridden by supported file extension |
 | `timeout` | no | both | Default `1800` for serverless, `120` for cluster |

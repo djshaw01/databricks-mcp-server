@@ -223,7 +223,7 @@ def execute_code(
 
     Args:
         code: Source code to execute remotely.
-        file_path: Optional local file path (.py, .sql, .ipynb, .scala, .r).
+        file_path: Optional local file path (.py, .sql, .scala, .r).
         compute_type: "auto", "serverless", or "cluster".
         language: Execution language for inline code.
         timeout: Optional run timeout in seconds.

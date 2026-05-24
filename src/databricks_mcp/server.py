@@ -319,21 +319,29 @@ def execute_code(
 
     if compute_type in ("auto", "serverless"):
         resolved_timeout = timeout if timeout is not None else 1800
-        result = run_code_on_serverless(
-            code=code or "",
-            profile=profile,
-            language=language,
-            timeout=resolved_timeout,
-            run_name=run_name,
-            cleanup=workspace_path is None,
-            workspace_path=workspace_path,
-        )
-        return _normalize_execute_code_response(
-            result=result.to_dict(),
-            requested_compute_type=requested_compute_type,
-            resolved_compute_type="serverless",
-            language=language,
-        )
+        try:
+            result = run_code_on_serverless(
+                code=code or "",
+                profile=profile,
+                language=language,
+                timeout=resolved_timeout,
+                run_name=run_name,
+                cleanup=workspace_path is None,
+                workspace_path=workspace_path,
+            )
+            return _normalize_execute_code_response(
+                result=result.to_dict(),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type="serverless",
+                language=language,
+            )
+        except (ValueError, DatabricksError) as exc:
+            return _normalize_execute_code_response(
+                result={"success": False, "error": str(exc), "state": "FAILED"},
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type="serverless",
+                language=language,
+            )
 
     resolved_timeout = timeout if timeout is not None else 120
     try:
@@ -449,23 +457,31 @@ def execute_notebook(
         }
 
     resolved_timeout = timeout if timeout is not None else 1800
-    result = run_notebook_job(
-        profile=profile,
-        compute_type=compute_type,
-        notebook_path=notebook_path,
-        code=code,
-        language=language,
-        timeout=resolved_timeout,
-        run_name=run_name,
-        cluster_id=cluster_id,
-        notebook_parameters=notebook_parameters,
-    )
-    return _normalize_execute_code_response(
-        result=result.to_dict(),
-        requested_compute_type=requested_compute_type,
-        resolved_compute_type=compute_type,
-        language=language,
-    )
+    try:
+        result = run_notebook_job(
+            profile=profile,
+            compute_type=compute_type,
+            notebook_path=notebook_path,
+            code=code,
+            language=language,
+            timeout=resolved_timeout,
+            run_name=run_name,
+            cluster_id=cluster_id,
+            notebook_parameters=notebook_parameters,
+        )
+        return _normalize_execute_code_response(
+            result=result.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type=compute_type,
+            language=language,
+        )
+    except (ValueError, DatabricksError) as exc:
+        return _normalize_execute_code_response(
+            result={"success": False, "error": str(exc), "state": "FAILED"},
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type=compute_type,
+            language=language,
+        )
 
 
 @mcp.tool()

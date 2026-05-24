@@ -45,7 +45,7 @@ class ClusterExecutionResult:
     error: str | None = None
     cluster_id: str | None = None
     context_id: str | None = None
-    context_destroyed: bool = True
+    context_destroyed: bool = False
     message: str | None = None
 
     def __post_init__(self) -> None:
@@ -428,18 +428,20 @@ def run_code_on_cluster(
         return result
 
     except Exception as exc:
+        context_destroyed = False
         if destroy_context_on_completion and context_id is not None:
             destroy_context(cluster_id, context_id, profile)
+            context_destroyed = True
         return ClusterExecutionResult(
             success=False,
             error=str(exc),
             output_kind="none",
             cluster_id=cluster_id,
             context_id=context_id,
-            context_destroyed=destroy_context_on_completion,
+            context_destroyed=context_destroyed,
             message=(
                 "Execution failed. Context was destroyed."
-                if destroy_context_on_completion
+                if context_destroyed
                 else "Execution failed."
             ),
         )

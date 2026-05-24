@@ -19,6 +19,13 @@ def _successful_wait(run_id: int = 123, task_run_id: int = 456) -> MagicMock:
 
 
 class NotebookJobRunnerTests(unittest.TestCase):
+    def test_compute_type_is_stripped_before_validation(self) -> None:
+        result = run_notebook_job(compute_type=" cluster ", notebook_path="/Workspace/Users/tester/existing")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.state, "INVALID_INPUT")
+        self.assertIn("cluster_id", result.error)
+
     @patch("databricks_mcp.notebook_jobs.get_client")
     def test_runs_existing_notebook_on_cluster_without_upload(self, mock_get_client: MagicMock) -> None:
         client = MagicMock()
@@ -133,6 +140,27 @@ class NotebookJobRunnerTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.message, "Notebook run failed with state FAILED. Check the Jobs UI for details.")
+
+    @patch("databricks_mcp.notebook_jobs.get_client")
+    def test_language_is_stripped_before_validation(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.submit.return_value = _successful_wait()
+        client.jobs.get_run.side_effect = [SimpleNamespace(run_page_url="https://example.test/runs/123")]
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            notebook_output=SimpleNamespace(result="ok"),
+            logs=None,
+            error=None,
+            error_trace=None,
+        )
+        mock_get_client.return_value = client
+
+        result = run_notebook_job(
+            compute_type="serverless",
+            code="SELECT 1",
+            language=" sql ",
+        )
+
+        self.assertTrue(result.success)
 
 
 if __name__ == "__main__":

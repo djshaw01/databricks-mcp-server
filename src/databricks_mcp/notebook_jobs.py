@@ -153,7 +153,7 @@ def run_notebook_job(
     notebook_parameters: dict[str, str] | None = None,
     job_extra_params: dict[str, Any] | None = None,
 ) -> NotebookJobRunResult:
-    normalized_compute_type = compute_type.lower()
+    normalized_compute_type = compute_type.strip().lower()
     if normalized_compute_type not in {"serverless", "cluster"}:
         return NotebookJobRunResult(
             success=False,
@@ -187,7 +187,7 @@ def run_notebook_job(
         )
 
     is_jupyter_notebook = bool(code) and is_ipynb(code)
-    language = language.lower()
+    language = language.strip().lower()
 
     if not is_jupyter_notebook and language not in _LANGUAGE_MAP:
         return NotebookJobRunResult(

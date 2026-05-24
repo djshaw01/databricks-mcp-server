@@ -63,7 +63,9 @@ _FILE_EXT_LANGUAGE = {
 
 
 def _none_if_empty(value: str | None) -> str | None:
-    return None if value == "" else value
+    if value is None:
+        return None
+    return None if value.strip() == "" else value
 
 
 def _normalize_execute_code_response(
@@ -242,8 +244,7 @@ def execute_code(
         - message: Human-readable summary.
         - output: Captured text output. For serverless runs this may include
           notebook result text and/or logs. For cluster runs this is the command result.
-        - output_kind: "text", "none", or a serverless output classification
-          derived from captured run output.
+        - output_kind: "text" when output text is present, otherwise "none".
         - language: Resolved execution language.
         - compute_type_requested / compute_type_resolved: Requested vs actual backend.
         - run_id / run_url / duration_seconds / state / workspace_path: Serverless run metadata.

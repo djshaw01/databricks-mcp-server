@@ -24,6 +24,16 @@ class ExecuteCodeToolTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("not valid", result["error"].lower())
 
+    @patch("databricks_mcp.server.run_code_on_serverless")
+    def test_whitespace_only_compute_type_treated_as_missing(self, mock_run_code_on_serverless: MagicMock) -> None:
+        mock_run_code_on_serverless.return_value.to_dict.return_value = {"success": True}
+
+        result = execute_code(code="print('hi')", compute_type="   ")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["compute_type_requested"], "auto")
+        self.assertEqual(result["compute_type_resolved"], "serverless")
+
     @patch("databricks_mcp.server.run_code_on_cluster")
     def test_cluster_compute_type_routes_to_cluster(self, mock_run: MagicMock) -> None:
         mock_run.return_value.to_dict.return_value = {
@@ -588,6 +598,11 @@ class JobRunToolsTests(unittest.TestCase):
 
 
 class RunCodeOnClusterTests(unittest.TestCase):
+    def test_cluster_result_defaults_context_destroyed_to_false(self) -> None:
+        result = ClusterExecutionResult(success=False, error="boom")
+
+        self.assertFalse(result.context_destroyed)
+
     @patch("databricks_mcp.compute_cluster.destroy_context")
     @patch("databricks_mcp.compute_cluster._run_on_context")
     @patch("databricks_mcp.compute_cluster.create_context")
@@ -640,6 +655,25 @@ class RunCodeOnClusterTests(unittest.TestCase):
         self.assertTrue(result.context_destroyed)
         self.assertEqual(result.message, "Execution failed. Context was destroyed.")
         mock_destroy_context.assert_called_once_with("abc", "ctx-2", "")
+
+    @patch("databricks_mcp.compute_cluster.destroy_context")
+    @patch("databricks_mcp.compute_cluster.create_context")
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_exception_before_context_creation_does_not_report_destroyed(
+        self,
+        mock_get_client: MagicMock,
+        mock_create_context: MagicMock,
+        mock_destroy_context: MagicMock,
+    ) -> None:
+        mock_get_client.return_value = MagicMock()
+        mock_create_context.side_effect = RuntimeError("context creation failed")
+
+        result = run_code_on_cluster(code="print(1)", cluster_id="abc", destroy_context_on_completion=True)
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.context_destroyed)
+        self.assertEqual(result.message, "Execution failed.")
+        mock_destroy_context.assert_not_called()
 
 
 if __name__ == "__main__":

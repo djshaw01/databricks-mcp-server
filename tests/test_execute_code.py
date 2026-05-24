@@ -132,6 +132,16 @@ class ExecuteCodeToolTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("not found", result["error"].lower())
 
+    def test_rejects_ipynb_files_for_execute_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "demo.ipynb"
+            path.write_text("{}", encoding="utf-8")
+
+            result = execute_code(file_path=str(path))
+
+        self.assertFalse(result["success"])
+        self.assertIn("execute_notebook", result["error"])
+
     def test_rejects_cluster_only_args_for_serverless_route(self) -> None:
         result = execute_code(code="print('hi')", compute_type="serverless", cluster_id="abc")
 

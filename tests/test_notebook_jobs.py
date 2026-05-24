@@ -106,6 +106,34 @@ class NotebookJobRunnerTests(unittest.TestCase):
         self.assertEqual(result.state, "INVALID_INPUT")
         self.assertIn("cluster_id", result.error)
 
+    @patch("databricks_mcp.notebook_jobs.get_client")
+    def test_failed_run_without_run_url_uses_generic_message(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.submit.return_value = _successful_wait()
+        client.jobs.get_run.side_effect = [SimpleNamespace(run_page_url=None)]
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            notebook_output=SimpleNamespace(result=None),
+            logs=None,
+            error=None,
+            error_trace=None,
+        )
+        wait = client.jobs.submit.return_value
+        wait.result.return_value = SimpleNamespace(
+            state=SimpleNamespace(result_state=RunResultState.FAILED, state_message="boom"),
+            run_page_url=None,
+            tasks=[],
+        )
+        mock_get_client.return_value = client
+
+        result = run_notebook_job(
+            compute_type="serverless",
+            code="print('hello')",
+            language="python",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, "Notebook run failed with state FAILED. Check the Jobs UI for details.")
+
 
 if __name__ == "__main__":
     unittest.main()

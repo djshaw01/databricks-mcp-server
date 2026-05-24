@@ -284,6 +284,11 @@ def execute_code(
             return {"success": False, "error": f"Failed to read file: {exc}"}
 
         suffix = pathlib.Path(file_path).suffix.lower()
+        if suffix == ".ipynb":
+            return {
+                "success": False,
+                "error": "execute_code does not support .ipynb notebooks. Use execute_notebook instead.",
+            }
         detected_language = _FILE_EXT_LANGUAGE.get(suffix)
         if detected_language:
             language = detected_language

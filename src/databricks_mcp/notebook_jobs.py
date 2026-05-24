@@ -380,7 +380,11 @@ def run_notebook_job(
             output_kind = "none"
             if not error_text:
                 error_text = state_message or f"Run ended with state: {state_str}"
-            message = f"Notebook run failed with state {state_str}. Check {run_url} for details."
+            message = (
+                f"Notebook run failed with state {state_str}. Check {run_url} for details."
+                if run_url
+                else f"Notebook run failed with state {state_str}. Check the Jobs UI for details."
+            )
 
         return NotebookJobRunResult(
             success=is_success,

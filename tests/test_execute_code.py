@@ -274,6 +274,28 @@ class RunCodeOnServerlessTests(unittest.TestCase):
         mock_run_notebook_job.assert_called_once()
 
     @patch("databricks_mcp.compute_serverless.run_notebook_job")
+    def test_success_without_workspace_path_keeps_effective_notebook_path(self, mock_run_notebook_job: MagicMock) -> None:
+        mock_run_notebook_job.return_value = SimpleNamespace(
+            success=True,
+            output="hello world",
+            output_kind="text",
+            error=None,
+            run_id=123,
+            run_url="https://example.test/runs/123",
+            duration_seconds=1.23,
+            state="SUCCESS",
+            message="ok",
+            notebook_path="/Workspace/Users/tester/.databricks_mcp_tmp/notebook_serverless_abc123",
+        )
+
+        result = run_code_on_serverless(code="print('hello')", profile="dan-test-db-2")
+
+        self.assertEqual(result.notebook_path, "/Workspace/Users/tester/.databricks_mcp_tmp/notebook_serverless_abc123")
+        self.assertIsNone(result.workspace_path)
+        self.assertEqual(result.to_dict()["notebook_path"], "/Workspace/Users/tester/.databricks_mcp_tmp/notebook_serverless_abc123")
+        self.assertNotIn("workspace_path", result.to_dict())
+
+    @patch("databricks_mcp.compute_serverless.run_notebook_job")
     def test_submit_failure_returns_structured_error(self, mock_run_notebook_job: MagicMock) -> None:
         mock_run_notebook_job.return_value = SimpleNamespace(
             success=False,
@@ -393,6 +415,53 @@ class JobRunToolsTests(unittest.TestCase):
         self.assertIn("table rows", result["output"])
         self.assertIn("stdout line", result["output"])
         client.jobs.get_run_output.assert_called_once_with(run_id=456)
+
+    @patch("databricks_mcp.server._get_client")
+    def test_get_job_run_output_preserves_task_run_id_when_no_tasks_are_present(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.get_run.return_value = SimpleNamespace(tasks=[])
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            as_dict=lambda: {
+                "notebook_output": {"result": "single run"},
+                "logs": None,
+                "error": None,
+                "error_trace": None,
+            },
+            notebook_output=SimpleNamespace(result="single run"),
+            logs=None,
+            error=None,
+            error_trace=None,
+        )
+        mock_get_client.return_value = client
+
+        result = get_job_run_output(run_id=123)
+
+        self.assertEqual(result["resolved_run_id"], 123)
+        self.assertEqual(result["task_run_id"], 123)
+        self.assertIsNone(result["task_key"])
+        client.jobs.get_run_output.assert_called_once_with(run_id=123)
+
+    @patch("databricks_mcp.server._get_client")
+    def test_get_job_run_export_preserves_task_run_id_when_no_tasks_are_present(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.get_run.return_value = SimpleNamespace(tasks=[])
+        client.jobs.export_run.return_value = SimpleNamespace(
+            views=[
+                SimpleNamespace(
+                    name="Notebook",
+                    type=SimpleNamespace(value="NOTEBOOK"),
+                    content="<html><body>rendered output</body></html>",
+                )
+            ]
+        )
+        mock_get_client.return_value = client
+
+        result = get_job_run_export(run_id=123)
+
+        self.assertEqual(result["resolved_run_id"], 123)
+        self.assertEqual(result["task_run_id"], 123)
+        self.assertIsNone(result["task_key"])
+        client.jobs.export_run.assert_called_once_with(run_id=123, views_to_export=ViewsToExport.CODE)
 
     @patch("databricks_mcp.server._get_client")
     def test_get_job_run_output_requires_task_key_for_multi_task_runs(self, mock_get_client: MagicMock) -> None:

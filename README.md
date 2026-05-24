@@ -354,16 +354,19 @@ Backend-specific fields are always present but may be `null`:
 | `context_id` | `null` | context id |
 | `context_destroyed` | `null` | boolean |
 
-### Output semantics and current limitation
+### Output semantics and run inspection
 
 - Cluster execution returns the textual result produced by the Command
   Execution API, when one is available.
-- Serverless execution currently maps Databricks Jobs run output into the
-  `output` field by returning `notebook_output.result` and appending `logs`
-  when logs are present.
-- This server does **not** yet expose a standalone MCP tool for fetching the
-  full raw `/api/2.2/jobs/runs/get-output` payload for an existing run after
-  the fact. Today, `execute_code` only returns the normalized execution result.
+- Serverless execution maps Databricks Jobs run output into the `output` field
+  by returning `notebook_output.result` and appending `logs` when logs are
+  present.
+- Use `get_job_run_output(run_id=...)` to inspect the structured Jobs output
+  for a completed run, including `notebook_output`, `logs`, and error details.
+- Use `get_job_run_export(run_id=...)` when you want HTML notebook exports and
+  richer rendered views for notebook iteration.
+- `execute_code` still returns the normalized execution result; `get_job_run_output`
+  and `get_job_run_export` are the follow-up tools for deeper inspection.
 
 ### Troubleshooting schema drift
 

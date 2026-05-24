@@ -15,6 +15,7 @@ class ServerlessRunResult:
     duration_seconds: float | None = None
     state: str | None = None
     message: str | None = None
+    notebook_path: str | None = None
     workspace_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -29,6 +30,8 @@ class ServerlessRunResult:
             "state": self.state,
             "message": self.message,
         }
+        if self.notebook_path:
+            result["notebook_path"] = self.notebook_path
         if self.workspace_path:
             result["workspace_path"] = self.workspace_path
         return result
@@ -66,5 +69,6 @@ def run_code_on_serverless(
         duration_seconds=result.duration_seconds,
         state=result.state,
         message=result.message,
-        workspace_path=result.notebook_path,
+        notebook_path=result.notebook_path,
+        workspace_path=workspace_path,
     )

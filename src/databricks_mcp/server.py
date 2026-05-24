@@ -10,7 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from databricks.sdk.errors import DatabricksError
-from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
+from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState, ViewsToExport
 from databricks.sdk.service.pipelines import PipelineState
 from fastmcp import FastMCP
 
@@ -22,6 +22,7 @@ from databricks_mcp.compute_cluster import (
     start_cluster,
 )
 from databricks_mcp.compute_serverless import run_code_on_serverless
+from databricks_mcp.notebook_jobs import run_notebook_job
 from databricks_mcp.sql_query import (
     QueryValidationError,
     execute_safe_query,
@@ -43,7 +44,13 @@ mcp = FastMCP(
         "tools (list_catalogs/list_schemas/list_tables/get_table/search_tables/"
         "search_columns) when finding catalogs, schemas, tables, or columns, use "
         "query_sql only when you need query result rows, and use execute_code for "
-        "Databricks code execution on serverless workflows or interactive clusters."
+        "Databricks code execution on serverless workflows or interactive clusters. "
+        "Use execute_notebook when creating, modifying, rerunning, or reviewing notebooks "
+        "on either serverless or existing clusters. "
+        "When execute_code returns a serverless run_id, use get_job_run_output to "
+        "inspect notebook result text, logs, and task-level output for the flow of the job. "
+        "Use get_job_run_export when you need the exported HTML notebook view for richer "
+        "rendering during notebook iteration."
     ),
 )
 
@@ -81,6 +88,7 @@ def _normalize_execute_code_response(
         "duration_seconds": result.get("duration_seconds"),
         "state": result.get("state"),
         "workspace_path": result.get("workspace_path"),
+        "notebook_path": result.get("notebook_path"),
         "cluster_id": result.get("cluster_id"),
         "context_id": result.get("context_id"),
         "context_destroyed": result.get("context_destroyed"),
@@ -96,6 +104,73 @@ def _fmt_ts(ms: int | None) -> str:
     if ms is None:
         return "—"
     return datetime.utcfromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _build_run_output_preview(run_output: Any) -> tuple[str | None, str]:
+    notebook_output = getattr(run_output, "notebook_output", None)
+    notebook_result = getattr(notebook_output, "result", None)
+    logs = getattr(run_output, "logs", None)
+
+    if notebook_result and logs:
+        return f"{notebook_result}\n\n--- Logs ---\n{logs}", "notebook_result+logs"
+    if notebook_result:
+        return notebook_result, "notebook_result"
+    if logs:
+        return logs, "logs"
+    return None, "none"
+
+
+def _parse_views_to_export(value: str) -> ViewsToExport:
+    normalized_value = value.strip().upper()
+    if not normalized_value:
+        return ViewsToExport.CODE
+
+    try:
+        return ViewsToExport(normalized_value)
+    except ValueError as exc:
+        valid_values = ", ".join(view.value for view in ViewsToExport)
+        raise ValueError(f"views_to_export must be one of: {valid_values}.") from exc
+
+
+def _truncate_content(content: str | None, max_characters: int | None) -> tuple[str | None, bool]:
+    if content is None or max_characters is None:
+        return content, False
+    if max_characters <= 0:
+        raise ValueError("max_view_characters must be a positive integer when provided.")
+    if len(content) <= max_characters:
+        return content, False
+    return content[:max_characters], True
+
+
+def _resolve_run_output_target(
+    *,
+    client: Any,
+    run_id: int,
+    task_key: str | None,
+) -> tuple[int, str | None]:
+    run = client.jobs.get_run(run_id)
+    tasks = run.tasks or []
+
+    if task_key:
+        for task in tasks:
+            if task.task_key == task_key:
+                return task.run_id or run_id, task.task_key
+        available = [task.task_key for task in tasks if task.task_key]
+        raise ValueError(
+            f"Run {run_id} does not have task_key={task_key!r}. Available task keys: {available or ['<none>']}."
+        )
+
+    if len(tasks) > 1:
+        available = [task.task_key for task in tasks if task.task_key]
+        raise ValueError(
+            f"Run {run_id} contains multiple tasks. Pass task_key to select one. Available task keys: {available}."
+        )
+
+    if len(tasks) == 1:
+        task = tasks[0]
+        return task.run_id or run_id, task.task_key
+
+    return run_id, None
 
 
 # ─── Jobs ────────────────────────────────────────────────────────────────────
@@ -123,8 +198,29 @@ def execute_code(
       - "cluster"     -> interactive cluster via Command Execution API
       - "auto"        -> serverless for Python/SQL, cluster for Scala/R
 
+    Use this tool for snippets, one-off commands, and REPL-style cluster iteration.
+    For notebook authoring, reruns, or reviewing rendered notebook output, prefer
+    `execute_notebook` so the run always goes through Jobs and can be inspected with
+    `get_job_run_output` / `get_job_run_export`.
+
     Cluster execution supports Python, SQL, Scala, and R and can reuse a
     returned context_id to preserve state across calls.
+
+    Serverless execution creates a Databricks Jobs run. The immediate `output`
+    field is a convenience summary only:
+      - notebook result text when Databricks captures notebook_output.result
+      - stdout/stderr logs when Databricks captures logs
+      - both combined when both are available
+      - no rich notebook rendering payload beyond what Databricks exposes in run output
+
+    For serverless runs, always retain the returned `run_id`. An agent can call
+    `get_job_run_output(run_id=...)` after `execute_code` to inspect the full
+    run output, review task-level flow, and fetch logs or notebook result text
+    again. For multi-task runs, use `get_job_run` first to discover `task_key`
+    or `task_run_id`, then call `get_job_run_output(run_id=..., task_key=...)`.
+    When richer rendered notebook views are needed, call
+    `get_job_run_export(run_id=...)` to retrieve the HTML export that Databricks
+    produces for the run.
 
     Args:
         code: Source code to execute remotely.
@@ -142,8 +238,19 @@ def execute_code(
 
     Returns:
         A normalized result with stable top-level fields for both backends:
-        success, error, message, output, output_kind, language,
-        compute_type_requested, and compute_type_resolved.
+        - success: Whether execution completed successfully.
+        - error: Error text when execution fails.
+        - message: Human-readable summary.
+        - output: Captured text output. For serverless runs this may include
+          notebook result text and/or logs. For cluster runs this is the command result.
+        - output_kind: "text", "none", or a serverless output classification
+          derived from captured run output.
+        - language: Resolved execution language.
+        - compute_type_requested / compute_type_resolved: Requested vs actual backend.
+        - run_id / run_url / duration_seconds / state / workspace_path: Serverless run metadata.
+        - cluster_id / context_id / context_destroyed: Cluster execution metadata.
+        - error_type / available_clusters / startable_clusters / skipped_clusters / suggestions:
+          Structured cluster-routing diagnostics when applicable.
     """
     code = _none_if_empty(code)
     file_path = _none_if_empty(file_path)
@@ -247,6 +354,113 @@ def execute_code(
             resolved_compute_type="cluster",
             language=language,
         )
+
+
+@mcp.tool()
+def execute_notebook(
+    code: str | None = None,
+    file_path: str | None = None,
+    notebook_path: str | None = None,
+    compute_type: str = "serverless",
+    language: str = "python",
+    timeout: int | None = None,
+    run_name: str | None = None,
+    cluster_id: str | None = None,
+    profile: str = "",
+    notebook_parameters: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """
+    Execute a Databricks notebook through the Jobs API on serverless or an existing cluster.
+
+    This is the preferred tool for notebook development and iteration. It supports:
+      - running an existing notebook at `notebook_path`
+      - uploading notebook content from `code` or `file_path`, then running it
+      - inspecting the resulting run with `get_job_run_output` and `get_job_run_export`
+
+    Unlike cluster-based `execute_code`, this tool does not use the Command Execution API
+    and does not return or reuse `context_id`. Every run is a Jobs notebook task with a
+    stable `run_id`.
+
+    Args:
+        code: Optional notebook source or raw .ipynb JSON content to upload and run.
+        file_path: Optional local file path (.py, .sql, .ipynb, .scala, .r) to upload and run.
+        notebook_path: Optional existing Databricks workspace notebook path to run, or the
+                       destination path to overwrite when `code` / `file_path` is supplied.
+        compute_type: "serverless" or "cluster".
+        language: Execution language for inline source content.
+        timeout: Optional run timeout in seconds.
+        run_name: Optional Jobs run name.
+        cluster_id: Required when compute_type="cluster". Existing cluster to use.
+        profile: Optional Databricks profile name for workspace selection.
+        notebook_parameters: Optional base parameters passed to the notebook task.
+
+    Returns:
+        A normalized Jobs-backed notebook run result with:
+        - success, error, message, output, output_kind
+        - language, compute_type_requested, compute_type_resolved
+        - run_id, run_url, duration_seconds, state
+        - notebook_path
+        - cluster_id (for cluster-backed notebook runs)
+    """
+    code = _none_if_empty(code)
+    file_path = _none_if_empty(file_path)
+    notebook_path = _none_if_empty(notebook_path)
+    compute_type = (_none_if_empty(compute_type) or "serverless").lower()
+    requested_compute_type = compute_type
+    language = (_none_if_empty(language) or "python").lower()
+    run_name = _none_if_empty(run_name)
+    cluster_id = _none_if_empty(cluster_id)
+
+    if not code and not file_path and not notebook_path:
+        return {
+            "success": False,
+            "error": "Provide notebook_path to run an existing notebook, or code/file_path to upload and run a notebook.",
+        }
+
+    if compute_type not in {"serverless", "cluster"}:
+        return {
+            "success": False,
+            "error": f"compute_type={compute_type!r} is not valid. Must be 'serverless' or 'cluster'.",
+        }
+
+    if file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as source_file:
+                code = source_file.read()
+        except FileNotFoundError:
+            return {"success": False, "error": f"File not found: {file_path}"}
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to read file: {exc}"}
+
+        suffix = pathlib.Path(file_path).suffix.lower()
+        detected_language = _FILE_EXT_LANGUAGE.get(suffix)
+        if detected_language:
+            language = detected_language
+
+    if compute_type == "cluster" and not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required when compute_type='cluster' for execute_notebook.",
+        }
+
+    resolved_timeout = timeout if timeout is not None else 1800
+    result = run_notebook_job(
+        profile=profile,
+        compute_type=compute_type,
+        notebook_path=notebook_path,
+        code=code,
+        language=language,
+        timeout=resolved_timeout,
+        run_name=run_name,
+        cluster_id=cluster_id,
+        notebook_parameters=notebook_parameters,
+    )
+    return _normalize_execute_code_response(
+        result=result.to_dict(),
+        requested_compute_type=requested_compute_type,
+        resolved_compute_type=compute_type,
+        language=language,
+    )
 
 
 @mcp.tool()
@@ -465,6 +679,7 @@ def get_job_run(run_id: int, profile: str = "") -> dict[str, Any]:
         task_details.append(
             {
                 "task_key": t.task_key,
+                "task_run_id": t.run_id,
                 "lifecycle_state": t_lifecycle,
                 "result_state": t_result,
                 "state_message": t_msg,
@@ -486,6 +701,113 @@ def get_job_run(run_id: int, profile: str = "") -> dict[str, Any]:
         "end_time": _fmt_ts(run.end_time),
         "run_page_url": run.run_page_url,
         "tasks": task_details,
+    }
+
+
+@mcp.tool()
+def get_job_run_output(run_id: int, task_key: str = "", profile: str = "") -> dict[str, Any]:
+    """
+    Get notebook result text, stdout/stderr logs, and error details for a Databricks job run.
+
+    For single-task runs, including runs created by `execute_code` on serverless compute,
+    the task run is resolved automatically from the parent run_id. For multi-task jobs,
+    pass task_key to choose which task's output to inspect.
+
+    Args:
+        run_id: The numeric parent run ID or task run ID.
+        task_key: Optional task key for multi-task runs.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        Run output details including notebook_output, logs, error, error_trace, and a
+        convenience `output` field that combines notebook result text and logs.
+    """
+    client = _get_client(profile)
+    normalized_task_key = _none_if_empty(task_key)
+    resolved_run_id, resolved_task_key = _resolve_run_output_target(
+        client=client,
+        run_id=run_id,
+        task_key=normalized_task_key,
+    )
+    run_output = client.jobs.get_run_output(run_id=resolved_run_id)
+    payload = run_output.as_dict() if hasattr(run_output, "as_dict") else {}
+    notebook_output = payload.get("notebook_output") or {}
+    output_preview, output_kind = _build_run_output_preview(run_output)
+
+    return {
+        "requested_run_id": run_id,
+        "resolved_run_id": resolved_run_id,
+        "task_key": resolved_task_key,
+        "task_run_id": resolved_run_id if resolved_task_key else None,
+        "output": output_preview,
+        "output_kind": output_kind,
+        "notebook_output_result": notebook_output.get("result"),
+        **payload,
+    }
+
+
+@mcp.tool()
+def get_job_run_export(
+    run_id: int,
+    task_key: str = "",
+    views_to_export: str = "CODE",
+    max_view_characters: int | None = 50000,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Export a Databricks job run as HTML views for notebook iteration and richer rendering review.
+
+    For single-task runs, including runs created by `execute_code` on serverless compute,
+    the task run is resolved automatically from the parent run_id. For multi-task jobs,
+    pass task_key to choose which task's exported notebook view to retrieve.
+
+    Args:
+        run_id: The numeric parent run ID or task run ID.
+        task_key: Optional task key for multi-task runs.
+        views_to_export: Which views to export: "CODE", "DASHBOARDS", or "ALL".
+        max_view_characters: Optional per-view content limit to keep responses manageable.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        Export metadata plus HTML view items. Each view includes name, type, content,
+        content_length, and whether the content was truncated in the MCP response.
+    """
+    client = _get_client(profile)
+    normalized_task_key = _none_if_empty(task_key)
+    resolved_run_id, resolved_task_key = _resolve_run_output_target(
+        client=client,
+        run_id=run_id,
+        task_key=normalized_task_key,
+    )
+    export_view = _parse_views_to_export(views_to_export)
+    export_output = client.jobs.export_run(run_id=resolved_run_id, views_to_export=export_view)
+
+    views = []
+    html_view_count = 0
+    for view in export_output.views or []:
+        content, truncated = _truncate_content(getattr(view, "content", None), max_view_characters)
+        original_content = getattr(view, "content", None)
+        if original_content:
+            html_view_count += 1
+        views.append(
+            {
+                "name": getattr(view, "name", None),
+                "type": getattr(getattr(view, "type", None), "value", None),
+                "content": content,
+                "content_length": len(original_content) if original_content is not None else 0,
+                "content_truncated": truncated,
+            }
+        )
+
+    return {
+        "requested_run_id": run_id,
+        "resolved_run_id": resolved_run_id,
+        "task_key": resolved_task_key,
+        "task_run_id": resolved_run_id if resolved_task_key else None,
+        "views_to_export": export_view.value,
+        "view_count": len(views),
+        "html_view_count": html_view_count,
+        "views": views,
     }
 
 

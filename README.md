@@ -11,6 +11,8 @@ Browse and operate Databricks Jobs, Delta Live Tables pipelines, and Unity Catal
 | `get_job` | Full job config (tasks, clusters, schedule) |
 | `list_job_runs` | Recent runs for a job with state and timing |
 | `get_job_run` | Per-task breakdown with error messages |
+| `get_job_run_output` | Notebook result text, logs, and error details for a run or task |
+| `get_job_run_export` | Export a run as HTML notebook views for richer rendering review |
 | `cancel_job_run` | Cancel an active run |
 | `run_job` | Trigger a new job run |
 
@@ -41,7 +43,8 @@ Browse and operate Databricks Jobs, Delta Live Tables pipelines, and Unity Catal
 ### Code Execution
 | Tool | Description |
 |------|-------------|
-| `execute_code` | Execute Python/SQL on serverless workflows or Python/SQL/Scala/R on interactive clusters |
+| `execute_code` | Execute one-off snippets on serverless workflows or interactive clusters; best for short commands and REPL-style cluster iteration |
+| `execute_notebook` | Create, modify, or rerun notebooks on serverless or an existing cluster through Jobs runs; keep the returned `run_id` and use `get_job_run_output` / `get_job_run_export` to inspect execution |
 | `list_compute` | List interactive clusters that can be targeted by `execute_code` |
 | `manage_cluster` | Get cluster status or start a terminated cluster |
 
@@ -146,8 +149,38 @@ databricks auth login --host https://adb-xxx.azuredatabricks.net --profile prod-
 
 ### Code Execution
 
+See also: [`docs/agent-tool-guide.md`](docs/agent-tool-guide.md) for user-facing guidance on how to tell the agent which execution tool to use.
+
+`execute_code` returns a normalized response with:
+
+- `success`, `error`, `message`
+- `output` and `output_kind`
+- `language`, `compute_type_requested`, `compute_type_resolved`
+- serverless metadata when applicable: `run_id`, `run_url`, `duration_seconds`, `state`, `workspace_path`
+- cluster metadata when applicable: `cluster_id`, `context_id`, `context_destroyed`
+
+Use `execute_code` for snippets and REPL-style iteration. For notebook development, prefer `execute_notebook`.
+
+For `compute_type="serverless"`, the returned `output` is only the captured text Databricks exposes for the run: notebook result text, logs, or both. To review the flow of the job after execution, keep the returned `run_id` and call `get_job_run_output`. When you need richer notebook renderings, call `get_job_run_export` to retrieve Databricks' exported HTML views for the run. For multi-task job runs, use `get_job_run` to discover task keys, then call `get_job_run_output(run_id=..., task_key=...)` or `get_job_run_export(run_id=..., task_key=...)`.
+
 ```
 Run this Python snippet with execute_code on serverless compute: print(1 + 1)
+```
+
+```
+Run this Python snippet with execute_code, then reuse the returned context_id on the next cluster call
+```
+
+```
+Run this Python notebook with execute_notebook, then use the returned run_id with get_job_run_output to inspect the job flow
+```
+
+```
+Run this Python notebook with execute_notebook, then use the returned run_id with get_job_run_export to inspect the rendered HTML notebook view
+```
+
+```
+Run the existing notebook /Workspace/Users/me/demo on cluster 0522-121745-8myg24rm with execute_notebook
 ```
 
 ```
@@ -169,6 +202,18 @@ List all my Databricks jobs
 ```
 ```
 Show the last 5 runs of job 12345 — any failures?
+```
+```
+Get the notebook output and logs for run 67890
+```
+```
+Export run 67890 as HTML so I can inspect the rendered notebook output
+```
+```
+Get the output for task "train" from multi-task run 67890
+```
+```
+Export the "train" task from multi-task run 67890 with views_to_export="ALL"
 ```
 ```
 Which jobs have a failed latest run?

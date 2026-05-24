@@ -403,12 +403,10 @@ def run_code_on_cluster(
             )
         cluster_id = best_id
 
-    context_created = False
-    if context_id is None:
-        context_id = create_context(cluster_id, language, profile)
-        context_created = True
-
     try:
+        if context_id is None:
+            context_id = create_context(cluster_id, language, profile)
+
         result = _run_on_context(
             client=client,
             cluster_id=cluster_id,
@@ -421,11 +419,27 @@ def run_code_on_cluster(
         if destroy_context_on_completion:
             destroy_context(cluster_id, context_id, profile)
             result.context_destroyed = True
-            result.message = "Execution successful. Context was destroyed."
+            result.message = (
+                "Execution successful. Context was destroyed."
+                if result.success
+                else "Execution failed. Context was destroyed."
+            )
 
         return result
 
-    except Exception:
-        if context_created and destroy_context_on_completion:
+    except Exception as exc:
+        if destroy_context_on_completion and context_id is not None:
             destroy_context(cluster_id, context_id, profile)
-        raise
+        return ClusterExecutionResult(
+            success=False,
+            error=str(exc),
+            output_kind="none",
+            cluster_id=cluster_id,
+            context_id=context_id,
+            context_destroyed=destroy_context_on_completion,
+            message=(
+                "Execution failed. Context was destroyed."
+                if destroy_context_on_completion
+                else "Execution failed."
+            ),
+        )

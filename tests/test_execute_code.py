@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from databricks.sdk.service.jobs import ViewsToExport
 
+from databricks_mcp.compute_cluster import ClusterExecutionResult, run_code_on_cluster
 from databricks_mcp.compute_serverless import run_code_on_serverless
 from databricks_mcp.server import execute_code, execute_notebook, get_job_run, get_job_run_export, get_job_run_output
 
@@ -574,6 +575,61 @@ class JobRunToolsTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "views_to_export"):
             get_job_run_export(run_id=123, views_to_export="widgets")
+
+
+class RunCodeOnClusterTests(unittest.TestCase):
+    @patch("databricks_mcp.compute_cluster.destroy_context")
+    @patch("databricks_mcp.compute_cluster._run_on_context")
+    @patch("databricks_mcp.compute_cluster.create_context")
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_destroy_context_on_failure_uses_failure_message(
+        self,
+        mock_get_client: MagicMock,
+        mock_create_context: MagicMock,
+        mock_run_on_context: MagicMock,
+        mock_destroy_context: MagicMock,
+    ) -> None:
+        mock_get_client.return_value = MagicMock()
+        mock_create_context.return_value = "ctx-1"
+        mock_run_on_context.return_value = ClusterExecutionResult(
+            success=False,
+            error="boom",
+            output_kind="none",
+            cluster_id="abc",
+            context_id="ctx-1",
+            context_destroyed=False,
+        )
+
+        result = run_code_on_cluster(code="print(1)", cluster_id="abc", destroy_context_on_completion=True)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.message, "Execution failed. Context was destroyed.")
+        self.assertTrue(result.context_destroyed)
+        mock_destroy_context.assert_called_once_with("abc", "ctx-1", "")
+
+    @patch("databricks_mcp.compute_cluster.destroy_context")
+    @patch("databricks_mcp.compute_cluster._run_on_context")
+    @patch("databricks_mcp.compute_cluster.create_context")
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_unexpected_exception_returns_structured_failure(
+        self,
+        mock_get_client: MagicMock,
+        mock_create_context: MagicMock,
+        mock_run_on_context: MagicMock,
+        mock_destroy_context: MagicMock,
+    ) -> None:
+        mock_get_client.return_value = MagicMock()
+        mock_create_context.return_value = "ctx-2"
+        mock_run_on_context.side_effect = RuntimeError("command execution exploded")
+
+        result = run_code_on_cluster(code="print(1)", cluster_id="abc", destroy_context_on_completion=True)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "command execution exploded")
+        self.assertEqual(result.context_id, "ctx-2")
+        self.assertTrue(result.context_destroyed)
+        self.assertEqual(result.message, "Execution failed. Context was destroyed.")
+        mock_destroy_context.assert_called_once_with("abc", "ctx-2", "")
 
 
 if __name__ == "__main__":

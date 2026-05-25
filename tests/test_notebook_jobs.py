@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from databricks.sdk.service.jobs import RunResultState
 
-from databricks_mcp.notebook_jobs import run_notebook_job
+from databricks_mcp.notebook_jobs import get_run_output, run_notebook_job
 
 
 def _successful_wait(run_id: int = 123, task_run_id: int = 456) -> MagicMock:
@@ -161,6 +161,32 @@ class NotebookJobRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
+
+    def test_get_run_output_preserves_empty_notebook_result(self) -> None:
+        client = MagicMock()
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            notebook_output=SimpleNamespace(result=""),
+            logs="stdout line",
+            error=None,
+            error_trace=None,
+        )
+
+        result = get_run_output(client=client, task_run_id=456)
+
+        self.assertEqual(result["output"], "\n\n--- Logs ---\nstdout line")
+
+    def test_get_run_output_preserves_empty_log_output(self) -> None:
+        client = MagicMock()
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            notebook_output=SimpleNamespace(result=""),
+            logs="",
+            error=None,
+            error_trace=None,
+        )
+
+        result = get_run_output(client=client, task_run_id=456)
+
+        self.assertEqual(result["output"], "\n\n--- Logs ---\n")
 
 
 if __name__ == "__main__":

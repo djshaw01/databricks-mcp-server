@@ -112,11 +112,11 @@ def _build_run_output_preview(run_output: Any) -> tuple[str | None, str]:
     notebook_result = getattr(notebook_output, "result", None)
     logs = getattr(run_output, "logs", None)
 
-    if notebook_result and logs:
+    if notebook_result is not None and logs is not None:
         return f"{notebook_result}\n\n--- Logs ---\n{logs}", "notebook_result+logs"
-    if notebook_result:
+    if notebook_result is not None:
         return notebook_result, "notebook_result"
-    if logs:
+    if logs is not None:
         return logs, "logs"
     return None, "none"
 

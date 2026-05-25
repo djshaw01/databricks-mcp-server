@@ -121,11 +121,11 @@ def get_run_output(*, client: Any, task_run_id: int) -> dict[str, str | None]:
         logger.debug("Failed to fetch output for task run %s: %s", task_run_id, exc)
         return {"output": None, "error": str(exc)}
 
-    if run_output.notebook_output and run_output.notebook_output.result:
+    if run_output.notebook_output and run_output.notebook_output.result is not None:
         result["output"] = run_output.notebook_output.result
 
-    if run_output.logs:
-        if result["output"]:
+    if run_output.logs is not None:
+        if result["output"] is not None:
             result["output"] += f"\n\n--- Logs ---\n{run_output.logs}"
         else:
             result["output"] = run_output.logs
@@ -370,10 +370,10 @@ def run_notebook_job(
             error_text = output_data["error"]
 
         if is_success:
-            output_kind = "text" if output_text else "none"
+            output_kind = "text" if output_text is not None else "none"
             message = (
                 f"Notebook executed successfully on {normalized_compute_type} compute in {elapsed}s."
-                if output_text
+                if output_text is not None
                 else f"Notebook executed successfully on {normalized_compute_type} compute in {elapsed}s with no captured output."
             )
         else:

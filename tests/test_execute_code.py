@@ -583,6 +583,29 @@ class JobRunToolsTests(unittest.TestCase):
         client.jobs.get_run_output.assert_called_once_with(run_id=789)
 
     @patch("databricks_mcp.server._get_client")
+    def test_get_job_run_output_preserves_empty_notebook_output(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.get_run.return_value = SimpleNamespace(tasks=[SimpleNamespace(task_key="main", run_id=456)])
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            as_dict=lambda: {
+                "notebook_output": {"result": ""},
+                "logs": None,
+                "error": None,
+                "error_trace": None,
+            },
+            notebook_output=SimpleNamespace(result=""),
+            logs=None,
+            error=None,
+            error_trace=None,
+        )
+        mock_get_client.return_value = client
+
+        result = get_job_run_output(run_id=123)
+
+        self.assertEqual(result["output"], "")
+        self.assertEqual(result["output_kind"], "notebook_result")
+
+    @patch("databricks_mcp.server._get_client")
     def test_get_job_run_export_auto_resolves_single_task_run(self, mock_get_client: MagicMock) -> None:
         client = MagicMock()
         client.jobs.get_run.return_value = SimpleNamespace(

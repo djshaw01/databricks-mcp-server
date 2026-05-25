@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from databricks.sdk.service.jobs import ViewsToExport
 
-from databricks_mcp.compute_cluster import ClusterExecutionResult, run_code_on_cluster
+from databricks_mcp.compute_cluster import ClusterExecutionResult, run_code_on_cluster, start_cluster
 from databricks_mcp.compute_serverless import run_code_on_serverless
 from databricks_mcp.server import execute_code, execute_notebook, get_job_run, get_job_run_export, get_job_run_output
 
@@ -751,6 +751,21 @@ class RunCodeOnClusterTests(unittest.TestCase):
         self.assertFalse(result.context_destroyed)
         self.assertEqual(result.message, "Execution failed.")
         mock_destroy_context.assert_not_called()
+
+
+class StartClusterTests(unittest.TestCase):
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_start_cluster_guidance_uses_manage_cluster_status(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.clusters.get.return_value = SimpleNamespace(
+            cluster_name="demo",
+            state=SimpleNamespace(value="TERMINATED"),
+        )
+        mock_get_client.return_value = client
+
+        result = start_cluster("abc")
+
+        self.assertIn("manage_cluster(action='status'", result["message"])
 
 
 if __name__ == "__main__":

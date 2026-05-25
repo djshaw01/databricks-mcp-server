@@ -338,7 +338,7 @@ All `execute_code` responses include the same top-level contract:
 | `output` | Captured textual output, or `null` when none was captured |
 | `output_kind` | `text` or `none` |
 | `language` | Final execution language after file extension detection |
-| `compute_type_requested` | Original `compute_type` input |
+| `compute_type_requested` | Normalized `compute_type` input after trimming and lowercasing |
 | `compute_type_resolved` | Actual backend used: `serverless` or `cluster` |
 
 Backend-specific fields are always present but may be `null`:

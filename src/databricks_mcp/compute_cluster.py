@@ -223,7 +223,7 @@ def start_cluster(cluster_id: str, profile: str = "") -> dict[str, Any]:
         "state": "PENDING",
         "message": (
             f"Cluster '{name}' is starting (typically 3–8 minutes). "
-            f"Use get_cluster_status(cluster_id='{cluster_id}') to check progress."
+            f"Use manage_cluster(action='status', cluster_id='{cluster_id}') to check progress."
         ),
     }
 

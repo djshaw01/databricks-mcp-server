@@ -135,6 +135,28 @@ def _normalize_execute_code_response(
         "suggestions": result.get("suggestions"),
     }
 
+
+def _normalized_tool_error(
+    *,
+    error: str,
+    requested_compute_type: str,
+    resolved_compute_type: str,
+    language: str,
+    state: str = "INVALID_INPUT",
+) -> dict[str, Any]:
+    return _normalize_execute_code_response(
+        result={
+            "success": False,
+            "error": error,
+            "state": state,
+            "output_kind": "none",
+        },
+        requested_compute_type=requested_compute_type,
+        resolved_compute_type=resolved_compute_type,
+        language=language,
+    )
+
+
 def _fmt_ts(ms: int | None) -> str:
     """Convert epoch milliseconds to a human-readable UTC string."""
     if ms is None:
@@ -302,31 +324,55 @@ def execute_code(
     context_id = _normalize_optional_string(context_id)
 
     if not code and not file_path:
-        return {"success": False, "error": "Either 'code' or 'file_path' must be provided."}
+        return _normalized_tool_error(
+            error="Either 'code' or 'file_path' must be provided.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
 
     if compute_type not in {"auto", "serverless", "cluster"}:
-        return {
-            "success": False,
-            "error": (
+        return _normalized_tool_error(
+            error=(
                 f"compute_type={compute_type!r} is not valid. "
                 "Must be 'auto', 'serverless', or 'cluster'."
             ),
-        }
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
 
     if file_path:
         try:
             code, suffix = _read_local_source_file(file_path)
         except ValueError as exc:
-            return {"success": False, "error": str(exc)}
+            return _normalized_tool_error(
+                error=str(exc),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         except FileNotFoundError:
-            return {"success": False, "error": f"File not found: {file_path}"}
+            return _normalized_tool_error(
+                error=f"File not found: {file_path}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         except Exception as exc:
-            return {"success": False, "error": f"Failed to read file: {exc}"}
+            return _normalized_tool_error(
+                error=f"Failed to read file: {exc}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         if suffix == ".ipynb":
-            return {
-                "success": False,
-                "error": "execute_code does not support .ipynb notebooks. Use execute_notebook instead.",
-            }
+            return _normalized_tool_error(
+                error="execute_code does not support .ipynb notebooks. Use execute_notebook instead.",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         detected_language = _FILE_EXT_LANGUAGE.get(suffix)
         if detected_language:
             language = detected_language
@@ -338,28 +384,34 @@ def execute_code(
     serverless_only_args_used = workspace_path is not None or run_name is not None
 
     if compute_type in ("auto", "serverless") and cluster_only_args_used:
-        return {
-            "success": False,
-            "error": (
+        return _normalized_tool_error(
+            error=(
                 "cluster_id, context_id, and destroy_context_on_completion are only valid "
                 "when compute_type resolves to 'cluster'. Use compute_type='cluster' to target a cluster."
             ),
-        }
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="serverless" if compute_type != "cluster" else compute_type,
+            language=language,
+        )
 
     if compute_type == "cluster" and serverless_only_args_used:
-        return {
-            "success": False,
-            "error": (
+        return _normalized_tool_error(
+            error=(
                 "workspace_path and run_name are only valid for serverless execution. "
                 "Remove them or use compute_type='serverless'."
             ),
-        }
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
 
     if compute_type == "cluster" and context_id is not None and cluster_id is None:
-        return {
-            "success": False,
-            "error": "cluster_id is required when reusing context_id for cluster execution.",
-        }
+        return _normalized_tool_error(
+            error="cluster_id is required when reusing context_id for cluster execution.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
 
     if compute_type in ("auto", "serverless"):
         resolved_timeout = timeout if timeout is not None else 1800
@@ -478,35 +530,56 @@ def execute_notebook(
     cluster_id = _normalize_optional_string(cluster_id)
 
     if not code and not file_path and not notebook_path:
-        return {
-            "success": False,
-            "error": "Provide notebook_path to run an existing notebook, or code/file_path to upload and run a notebook.",
-        }
+        return _normalized_tool_error(
+            error="Provide notebook_path to run an existing notebook, or code/file_path to upload and run a notebook.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
 
     if compute_type not in {"serverless", "cluster"}:
-        return {
-            "success": False,
-            "error": f"compute_type={compute_type!r} is not valid. Must be 'serverless' or 'cluster'.",
-        }
+        return _normalized_tool_error(
+            error=f"compute_type={compute_type!r} is not valid. Must be 'serverless' or 'cluster'.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
 
     if file_path:
         try:
             code, suffix = _read_local_source_file(file_path)
         except ValueError as exc:
-            return {"success": False, "error": str(exc)}
+            return _normalized_tool_error(
+                error=str(exc),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         except FileNotFoundError:
-            return {"success": False, "error": f"File not found: {file_path}"}
+            return _normalized_tool_error(
+                error=f"File not found: {file_path}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         except Exception as exc:
-            return {"success": False, "error": f"Failed to read file: {exc}"}
+            return _normalized_tool_error(
+                error=f"Failed to read file: {exc}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
         detected_language = _FILE_EXT_LANGUAGE.get(suffix)
         if detected_language:
             language = detected_language
 
     if compute_type == "cluster" and not cluster_id:
-        return {
-            "success": False,
-            "error": "cluster_id is required when compute_type='cluster' for execute_notebook.",
-        }
+        return _normalized_tool_error(
+            error="cluster_id is required when compute_type='cluster' for execute_notebook.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
 
     resolved_timeout = timeout if timeout is not None else 1800
     try:

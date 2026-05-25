@@ -26,12 +26,19 @@ class ExecuteCodeToolTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("code", result["error"].lower())
+        self.assertEqual(result["state"], "INVALID_INPUT")
+        self.assertEqual(result["compute_type_requested"], "auto")
+        self.assertEqual(result["compute_type_resolved"], "none")
+        self.assertEqual(result["language"], "python")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_rejects_unknown_compute_type(self) -> None:
         result = execute_code(code="print('hi')", compute_type="gpu")
 
         self.assertFalse(result["success"])
         self.assertIn("not valid", result["error"].lower())
+        self.assertEqual(result["compute_type_resolved"], "none")
+        self.assertEqual(result["output_kind"], "none")
 
     @patch("databricks_mcp.server.run_code_on_serverless")
     def test_whitespace_only_compute_type_treated_as_missing(self, mock_run_code_on_serverless: MagicMock) -> None:
@@ -192,6 +199,16 @@ class ExecuteCodeToolTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "no_running_cluster")
         self.assertEqual(result["compute_type_resolved"], "cluster")
 
+    def test_no_running_cluster_suggestion_avoids_claiming_ownership(self) -> None:
+        from databricks_mcp.compute_cluster import NoRunningClusterError
+
+        error = NoRunningClusterError(
+            available_clusters=[],
+            startable_clusters=[{"cluster_name": "demo", "cluster_id": "abc", "state": "TERMINATED"}],
+        )
+
+        self.assertIn("terminated cluster you may be able to start", error.suggestions[0])
+
     def test_missing_file_returns_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "does-not-exist.py"
@@ -200,6 +217,8 @@ class ExecuteCodeToolTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("not found", result["error"].lower())
+        self.assertEqual(result["compute_type_resolved"], "auto")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_rejects_ipynb_files_for_execute_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -211,24 +230,32 @@ class ExecuteCodeToolTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("execute_notebook", result["error"])
+        self.assertEqual(result["compute_type_resolved"], "auto")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_rejects_cluster_only_args_for_serverless_route(self) -> None:
         result = execute_code(code="print('hi')", compute_type="serverless", cluster_id="abc")
 
         self.assertFalse(result["success"])
         self.assertIn("only valid", result["error"].lower())
+        self.assertEqual(result["compute_type_resolved"], "serverless")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_rejects_serverless_only_args_for_cluster_route(self) -> None:
         result = execute_code(code="print('hi')", compute_type="cluster", run_name="demo")
 
         self.assertFalse(result["success"])
         self.assertIn("serverless execution", result["error"].lower())
+        self.assertEqual(result["compute_type_resolved"], "cluster")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_context_id_requires_cluster_id(self) -> None:
         result = execute_code(code="print('hi')", compute_type="cluster", context_id="ctx-1")
 
         self.assertFalse(result["success"])
         self.assertIn("cluster_id", result["error"])
+        self.assertEqual(result["compute_type_resolved"], "cluster")
+        self.assertEqual(result["output_kind"], "none")
 
     @patch("databricks_mcp.server.run_code_on_cluster")
     def test_cluster_path_returns_structured_error_for_configuration_failures(self, mock_run: MagicMock) -> None:
@@ -262,18 +289,25 @@ class ExecuteNotebookToolTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("notebook_path", result["error"])
+        self.assertEqual(result["compute_type_requested"], "serverless")
+        self.assertEqual(result["compute_type_resolved"], "none")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_rejects_unknown_compute_type(self) -> None:
         result = execute_notebook(notebook_path="/Workspace/Users/tester/demo", compute_type="auto")
 
         self.assertFalse(result["success"])
         self.assertIn("not valid", result["error"])
+        self.assertEqual(result["compute_type_resolved"], "none")
+        self.assertEqual(result["output_kind"], "none")
 
     def test_cluster_requires_cluster_id(self) -> None:
         result = execute_notebook(notebook_path="/Workspace/Users/tester/demo", compute_type="cluster")
 
         self.assertFalse(result["success"])
         self.assertIn("cluster_id", result["error"])
+        self.assertEqual(result["compute_type_resolved"], "cluster")
+        self.assertEqual(result["output_kind"], "none")
 
     @patch("databricks_mcp.server.run_notebook_job")
     def test_runs_existing_notebook(self, mock_run_notebook_job: MagicMock) -> None:

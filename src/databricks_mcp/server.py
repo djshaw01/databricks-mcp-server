@@ -1406,9 +1406,11 @@ def manage_cluster(
     """
     action = (action or "").strip().lower()
     if action == "status":
-        return get_cluster_status(cluster_id, profile)
+        result = get_cluster_status(cluster_id, profile)
+        return {"success": True, "error": None, **result}
     if action == "start":
-        return start_cluster(cluster_id, profile)
+        result = start_cluster(cluster_id, profile)
+        return {"success": True, "error": None, **result}
     return {
         "success": False,
         "error": f"Unknown action {action!r}. Must be 'status' or 'start'.",

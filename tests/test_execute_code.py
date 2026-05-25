@@ -9,7 +9,15 @@ from databricks.sdk.service.jobs import ViewsToExport
 
 from databricks_mcp.compute_cluster import ClusterExecutionResult, run_code_on_cluster, start_cluster
 from databricks_mcp.compute_serverless import run_code_on_serverless
-from databricks_mcp.server import execute_code, execute_notebook, get_job_run, get_job_run_export, get_job_run_output
+from databricks_mcp.server import (
+    execute_code,
+    execute_notebook,
+    get_job_run,
+    get_job_run_export,
+    get_job_run_output,
+    list_compute,
+    manage_cluster,
+)
 
 
 class ExecuteCodeToolTests(unittest.TestCase):
@@ -921,6 +929,55 @@ class StartClusterTests(unittest.TestCase):
         result = start_cluster("abc")
 
         self.assertIn("manage_cluster(action='status'", result["message"])
+
+
+class ComputeToolTests(unittest.TestCase):
+    @patch("databricks_mcp.server.list_clusters")
+    def test_list_compute_forwards_include_terminated(self, mock_list_clusters: MagicMock) -> None:
+        mock_list_clusters.return_value = [{"cluster_id": "abc"}]
+
+        result = list_compute(include_terminated=True, profile="test-profile")
+
+        self.assertEqual(result, [{"cluster_id": "abc"}])
+        mock_list_clusters.assert_called_once_with(profile="test-profile", include_terminated=True)
+
+    @patch("databricks_mcp.server.get_cluster_status")
+    def test_manage_cluster_status_returns_normalized_success_payload(self, mock_get_cluster_status: MagicMock) -> None:
+        mock_get_cluster_status.return_value = {
+            "cluster_id": "abc",
+            "cluster_name": "demo",
+            "state": "RUNNING",
+            "message": "ready",
+        }
+
+        result = manage_cluster(action="status", cluster_id="abc", profile="test-profile")
+
+        self.assertTrue(result["success"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["cluster_id"], "abc")
+        mock_get_cluster_status.assert_called_once_with("abc", "test-profile")
+
+    @patch("databricks_mcp.server.start_cluster")
+    def test_manage_cluster_start_returns_normalized_success_payload(self, mock_start_cluster: MagicMock) -> None:
+        mock_start_cluster.return_value = {
+            "cluster_id": "abc",
+            "cluster_name": "demo",
+            "state": "PENDING",
+            "message": "starting",
+        }
+
+        result = manage_cluster(action="start", cluster_id="abc", profile="test-profile")
+
+        self.assertTrue(result["success"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["state"], "PENDING")
+        mock_start_cluster.assert_called_once_with("abc", "test-profile")
+
+    def test_manage_cluster_rejects_unknown_action(self) -> None:
+        result = manage_cluster(action="stop", cluster_id="abc")
+
+        self.assertFalse(result["success"])
+        self.assertIn("Unknown action", result["error"])
 
 
 if __name__ == "__main__":

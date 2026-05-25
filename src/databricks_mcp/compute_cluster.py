@@ -410,25 +410,25 @@ def run_code_on_cluster(
         best_id, skipped = _select_best_cluster(client, current_user)
         if best_id is None:
             all_clusters = list_clusters(profile=profile)
-        terminated_filter = ListClustersFilterBy(
-            cluster_sources=_USER_CLUSTER_SOURCES,
-            cluster_states=[State.TERMINATED, State.TERMINATING, State.ERROR],
-        )
-        terminated = []
-        for c in client.clusters.list(filter_by=terminated_filter):
-            if not _is_cluster_accessible(c, current_user):
-                continue
-            terminated.append({
-                "cluster_id": c.cluster_id,
-                "cluster_name": c.cluster_name or "",
-                "state": c.state.value if c.state else None,
-                "creator_user_name": c.creator_user_name,
-            })
-        raise NoRunningClusterError(
-            available_clusters=all_clusters,
-            skipped_clusters=skipped,
-            startable_clusters=terminated,
-        )
+            terminated_filter = ListClustersFilterBy(
+                cluster_sources=_USER_CLUSTER_SOURCES,
+                cluster_states=[State.TERMINATED, State.TERMINATING, State.ERROR],
+            )
+            terminated = []
+            for c in client.clusters.list(filter_by=terminated_filter):
+                if not _is_cluster_accessible(c, current_user):
+                    continue
+                terminated.append({
+                    "cluster_id": c.cluster_id,
+                    "cluster_name": c.cluster_name or "",
+                    "state": c.state.value if c.state else None,
+                    "creator_user_name": c.creator_user_name,
+                })
+            raise NoRunningClusterError(
+                available_clusters=all_clusters,
+                skipped_clusters=skipped,
+                startable_clusters=terminated,
+            )
         cluster_id = best_id
 
     try:

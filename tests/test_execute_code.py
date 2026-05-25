@@ -922,6 +922,37 @@ class RunCodeOnClusterTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("cluster_id", result.error)
 
+    @patch("databricks_mcp.compute_cluster._run_on_context")
+    @patch("databricks_mcp.compute_cluster.create_context")
+    @patch("databricks_mcp.compute_cluster._select_best_cluster")
+    @patch("databricks_mcp.compute_cluster.get_current_username")
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_auto_select_uses_best_cluster_without_raising_no_running_cluster(
+        self,
+        mock_get_client: MagicMock,
+        mock_get_current_username: MagicMock,
+        mock_select_best_cluster: MagicMock,
+        mock_create_context: MagicMock,
+        mock_run_on_context: MagicMock,
+    ) -> None:
+        mock_get_client.return_value = MagicMock()
+        mock_get_current_username.return_value = "user@example.com"
+        mock_select_best_cluster.return_value = ("abc", [])
+        mock_create_context.return_value = "ctx-4"
+        mock_run_on_context.return_value = ClusterExecutionResult(
+            success=True,
+            output="ok",
+            output_kind="text",
+            cluster_id="abc",
+            context_id="ctx-4",
+        )
+
+        result = run_code_on_cluster(code="print(1)")
+
+        self.assertTrue(result.success)
+        mock_create_context.assert_called_once_with("abc", "python", "")
+        mock_run_on_context.assert_called_once()
+
     @patch("databricks_mcp.compute_cluster.destroy_context", return_value=False)
     @patch("databricks_mcp.compute_cluster._run_on_context")
     @patch("databricks_mcp.compute_cluster.create_context")

@@ -156,7 +156,7 @@ See also: [`docs/agent-tool-guide.md`](docs/agent-tool-guide.md) for user-facing
 - `success`, `error`, `message`
 - `output` and `output_kind`
 - `language`, `compute_type_requested`, `compute_type_resolved`
-- serverless metadata when applicable: `run_id`, `run_url`, `duration_seconds`, `state`, `workspace_path`
+- serverless metadata when applicable: `run_id`, `run_url`, `duration_seconds`, `state`, `workspace_path`, `notebook_path`
 - cluster metadata when applicable: `cluster_id`, `context_id`, `context_destroyed`
 
 Use `execute_code` for snippets and REPL-style iteration. For notebook development, prefer `execute_notebook`.
@@ -168,7 +168,7 @@ Run this Python snippet with execute_code on serverless compute: print(1 + 1)
 ```
 
 ```
-Run this Python snippet with execute_code, then reuse the returned context_id on the next cluster call
+Run this Python snippet with execute_code on cluster 0522-121745-8myg24rm, then reuse the returned context_id with the same cluster_id on the next cluster call
 ```
 
 ```
@@ -188,7 +188,7 @@ Run this Scala snippet with execute_code on cluster 0522-121745-8myg24rm: printl
 ```
 
 ```
-Use execute_code with compute_type="cluster" and reuse the returned context_id on the next call
+Use execute_code with compute_type="cluster" on cluster 0522-121745-8myg24rm and reuse the returned context_id with the same cluster_id on the next call
 ```
 
 ```
@@ -303,15 +303,15 @@ databricks-mcp-server/
 | Field | Required | Applies to | Notes |
 |------|----------|------------|------|
 | `code` | one of `code`/`file_path` | both | Inline source to execute |
-| `file_path` | one of `code`/`file_path` | both | Local `.py`, `.sql`, `.scala`, or `.r` file |
+| `file_path` | one of `code`/`file_path` | both | Local `.py`, `.sql`, `.scala`, or `.r` file under the current working directory by default; set `DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1` to opt in to arbitrary local paths |
 | `compute_type` | no | both | `auto` (default), `serverless`, or `cluster` |
 | `language` | no | both | Defaults to `python`; overridden by supported file extension |
 | `timeout` | no | both | Default `1800` for serverless, `120` for cluster |
 | `profile` | no | both | Named workspace profile from `.env` |
 | `workspace_path` | no | serverless only | Persist uploaded notebook and skip cleanup |
 | `run_name` | no | serverless only | Optional Jobs run name |
-| `cluster_id` | no | cluster only | Target interactive cluster; omitted means auto-select a running cluster |
-| `context_id` | no | cluster only | Reuse an existing command execution context |
+| `cluster_id` | no | cluster only | Target interactive cluster; omitted means auto-select a running cluster unless `context_id` is provided |
+| `context_id` | no | cluster only | Reuse an existing command execution context; requires the original `cluster_id` |
 | `destroy_context_on_completion` | no | cluster only | Destroy the execution context after the run |
 
 ### Routing rules
@@ -323,8 +323,9 @@ databricks-mcp-server/
    - `cluster` for Scala and R
 4. If `file_path` is provided, its extension overrides `language`.
 5. If cluster execution is selected and `cluster_id` is omitted, the server picks the best running accessible cluster by preferring names containing `shared`, then `demo`, then the first remaining running cluster.
-6. `cluster_id`, `context_id`, and `destroy_context_on_completion` are invalid for serverless execution.
-7. `workspace_path` and `run_name` are invalid for cluster execution.
+6. If `context_id` is provided, `cluster_id` must also be provided so the context is reused on its original cluster.
+7. `cluster_id`, `context_id`, and `destroy_context_on_completion` are invalid for serverless execution.
+8. `workspace_path` and `run_name` are invalid for cluster execution.
 
 ### Normalized response fields
 

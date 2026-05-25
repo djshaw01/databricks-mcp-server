@@ -5,6 +5,7 @@ Exposes Databricks Jobs and Delta Live Tables (Pipelines) as MCP tools.
 """
 
 import pathlib
+import os
 from datetime import datetime
 from typing import Any
 
@@ -61,11 +62,45 @@ _FILE_EXT_LANGUAGE = {
     ".r": "r",
 }
 
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
 
 def _none_if_empty(value: str | None) -> str | None:
     if value is None:
         return None
     return None if value.strip() == "" else value
+
+
+def _normalize_optional_string(value: str | None) -> str | None:
+    normalized = _none_if_empty(value)
+    return normalized.strip() if normalized is not None else None
+
+
+def _allow_arbitrary_local_file_paths() -> bool:
+    return os.getenv("DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS", "").strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _validate_local_file_path(file_path: str) -> str:
+    expanded_path = pathlib.Path(file_path).expanduser()
+    if _allow_arbitrary_local_file_paths():
+        return str(expanded_path)
+
+    cwd = pathlib.Path.cwd().resolve()
+    resolved_path = expanded_path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(cwd)
+    except ValueError as exc:
+        raise ValueError(
+            "file_path must stay within the current working directory unless "
+            "DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set."
+        ) from exc
+    return str(expanded_path)
+
+
+def _read_local_source_file(file_path: str) -> tuple[str, str]:
+    validated_file_path = _validate_local_file_path(file_path)
+    with open(validated_file_path, "r", encoding="utf-8") as source_file:
+        return source_file.read(), pathlib.Path(validated_file_path).suffix.lower()
 
 
 def _normalize_execute_code_response(
@@ -205,7 +240,7 @@ def execute_code(
     `get_job_run_output` / `get_job_run_export`.
 
     Cluster execution supports Python, SQL, Scala, and R and can reuse a
-    returned context_id to preserve state across calls.
+    returned context_id with the same cluster_id to preserve state across calls.
 
     Serverless execution creates a Databricks Jobs run. The immediate `output`
     field is a convenience summary only:
@@ -225,15 +260,19 @@ def execute_code(
 
     Args:
         code: Source code to execute remotely.
-        file_path: Optional local file path (.py, .sql, .scala, .r).
+        file_path: Optional local file path (.py, .sql, .scala, .r). By default it must
+                   resolve under the current working directory unless
+                   DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set.
         compute_type: "auto", "serverless", or "cluster".
         language: Execution language for inline code.
         timeout: Optional run timeout in seconds.
         workspace_path: Optional Databricks workspace path to persist the notebook.
                         Valid only for serverless execution.
         run_name: Optional Jobs run name for serverless execution.
-        cluster_id: Optional interactive cluster ID for cluster execution.
-        context_id: Optional existing execution context to reuse on a cluster.
+        cluster_id: Optional interactive cluster ID for cluster execution. Required when
+                    reusing context_id.
+        context_id: Optional existing execution context to reuse on a cluster. Requires
+                    the original cluster_id.
         destroy_context_on_completion: Destroy the execution context after a cluster run.
         profile: Optional Databricks profile name for workspace selection.
 
@@ -253,14 +292,14 @@ def execute_code(
           Structured cluster-routing diagnostics when applicable.
     """
     code = _none_if_empty(code)
-    file_path = _none_if_empty(file_path)
-    compute_type = ((_none_if_empty(compute_type) or "auto").strip()).lower()
+    file_path = _normalize_optional_string(file_path)
+    compute_type = (_normalize_optional_string(compute_type) or "auto").lower()
     requested_compute_type = compute_type
-    language = ((_none_if_empty(language) or "python").strip()).lower()
-    workspace_path = _none_if_empty(workspace_path)
-    run_name = _none_if_empty(run_name)
-    cluster_id = _none_if_empty(cluster_id)
-    context_id = _none_if_empty(context_id)
+    language = (_normalize_optional_string(language) or "python").lower()
+    workspace_path = _normalize_optional_string(workspace_path)
+    run_name = _normalize_optional_string(run_name)
+    cluster_id = _normalize_optional_string(cluster_id)
+    context_id = _normalize_optional_string(context_id)
 
     if not code and not file_path:
         return {"success": False, "error": "Either 'code' or 'file_path' must be provided."}
@@ -276,14 +315,13 @@ def execute_code(
 
     if file_path:
         try:
-            with open(file_path, "r", encoding="utf-8") as source_file:
-                code = source_file.read()
+            code, suffix = _read_local_source_file(file_path)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
         except FileNotFoundError:
             return {"success": False, "error": f"File not found: {file_path}"}
         except Exception as exc:
             return {"success": False, "error": f"Failed to read file: {exc}"}
-
-        suffix = pathlib.Path(file_path).suffix.lower()
         if suffix == ".ipynb":
             return {
                 "success": False,
@@ -315,6 +353,12 @@ def execute_code(
                 "workspace_path and run_name are only valid for serverless execution. "
                 "Remove them or use compute_type='serverless'."
             ),
+        }
+
+    if compute_type == "cluster" and context_id is not None and cluster_id is None:
+        return {
+            "success": False,
+            "error": "cluster_id is required when reusing context_id for cluster execution.",
         }
 
     if compute_type in ("auto", "serverless"):
@@ -367,6 +411,13 @@ def execute_code(
             resolved_compute_type="cluster",
             language=language,
         )
+    except (ValueError, DatabricksError) as exc:
+        return _normalize_execute_code_response(
+            result={"success": False, "error": str(exc), "state": "FAILED"},
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
 
 
 @mcp.tool()
@@ -397,6 +448,8 @@ def execute_notebook(
     Args:
         code: Optional notebook source or raw .ipynb JSON content to upload and run.
         file_path: Optional local file path (.py, .sql, .ipynb, .scala, .r) to upload and run.
+                   By default it must resolve under the current working directory unless
+                   DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set.
         notebook_path: Optional existing Databricks workspace notebook path to run, or the
                        destination path to overwrite when `code` / `file_path` is supplied.
         compute_type: "serverless" or "cluster".
@@ -416,13 +469,13 @@ def execute_notebook(
         - cluster_id (for cluster-backed notebook runs)
     """
     code = _none_if_empty(code)
-    file_path = _none_if_empty(file_path)
-    notebook_path = _none_if_empty(notebook_path)
-    compute_type = ((_none_if_empty(compute_type) or "serverless").strip()).lower()
+    file_path = _normalize_optional_string(file_path)
+    notebook_path = _normalize_optional_string(notebook_path)
+    compute_type = (_normalize_optional_string(compute_type) or "serverless").lower()
     requested_compute_type = compute_type
-    language = ((_none_if_empty(language) or "python").strip()).lower()
-    run_name = _none_if_empty(run_name)
-    cluster_id = _none_if_empty(cluster_id)
+    language = (_normalize_optional_string(language) or "python").lower()
+    run_name = _normalize_optional_string(run_name)
+    cluster_id = _normalize_optional_string(cluster_id)
 
     if not code and not file_path and not notebook_path:
         return {
@@ -438,14 +491,13 @@ def execute_notebook(
 
     if file_path:
         try:
-            with open(file_path, "r", encoding="utf-8") as source_file:
-                code = source_file.read()
+            code, suffix = _read_local_source_file(file_path)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
         except FileNotFoundError:
             return {"success": False, "error": f"File not found: {file_path}"}
         except Exception as exc:
             return {"success": False, "error": f"Failed to read file: {exc}"}
-
-        suffix = pathlib.Path(file_path).suffix.lower()
         detected_language = _FILE_EXT_LANGUAGE.get(suffix)
         if detected_language:
             language = detected_language
@@ -812,7 +864,7 @@ def get_job_run_export(
     for view in export_output.views or []:
         content, truncated = _truncate_content(getattr(view, "content", None), max_view_characters)
         original_content = getattr(view, "content", None)
-        if original_content:
+        if original_content is not None:
             html_view_count += 1
         views.append(
             {

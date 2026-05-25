@@ -42,7 +42,7 @@ Use execute_code on serverless to run this Python snippet: print(1 + 1)
 ```
 
 ```text
-Use execute_code with compute_type="cluster" on cluster 0522-121745-8myg24rm and reuse the returned context_id for follow-up commands
+Use execute_code with compute_type="cluster" on cluster 0522-121745-8myg24rm and reuse the returned context_id with the same cluster_id for follow-up commands
 ```
 
 ```text
@@ -52,7 +52,7 @@ Use execute_code on cluster to try this Scala snippet: println(spark.version)
 `execute_code` is best when:
 
 - the task is a short snippet
-- you want fast iteration on a cluster with `context_id`
+- you want fast iteration on a cluster with `context_id` and the same `cluster_id`
 - you do not need a notebook-first workflow
 
 ## When to use `execute_notebook`
@@ -74,7 +74,7 @@ Run the existing notebook /Workspace/Users/me/customer-demo on cluster 0522-1217
 ```
 
 ```text
-Use execute_notebook to upload notebook content from this local file and run it on cluster 0522-121745-8myg24rm: notebooks/train_model.scala
+Use execute_notebook to upload notebook content from this local file under the current working directory and run it on cluster 0522-121745-8myg24rm: notebooks/train_model.scala
 ```
 
 ```text
@@ -429,7 +429,7 @@ Update the notebook /Workspace/Users/me/demo-notebook, rerun it with execute_not
 ### Cluster REPL iteration
 
 ```text
-Use execute_code with compute_type="cluster" for interactive iteration on cluster 0522-121745-8myg24rm, and keep reusing the same context_id
+Use execute_code with compute_type="cluster" for interactive iteration on cluster 0522-121745-8myg24rm, and keep reusing the same context_id with that same cluster_id
 ```
 
 ### Job investigation

@@ -271,12 +271,18 @@ def create_context(cluster_id: str, language: str = "python", profile: str = "")
     return result.id
 
 
-def destroy_context(cluster_id: str, context_id: str, profile: str = "") -> None:
+def destroy_context(cluster_id: str, context_id: str, profile: str = "") -> bool:
     client = get_client(profile)
     try:
         client.command_execution.destroy(cluster_id=cluster_id, context_id=context_id)
+        return True
     except Exception as exc:
+        message = str(exc).lower()
+        if "resource_does_not_exist" in message or "does not exist" in message or "not found" in message:
+            logger.debug("Context already absent (cluster=%s context=%s): %s", cluster_id, context_id, exc)
+            return True
         logger.debug("Context destroy failed (cluster=%s context=%s): %s", cluster_id, context_id, exc)
+        return False
 
 
 # ─── Core execution ───────────────────────────────────────────────────────────
@@ -365,7 +371,8 @@ def run_code_on_cluster(
     """
     Execute code on an interactive Databricks cluster via the Command Execution API.
 
-    If context_id is provided, the existing context is reused (faster; preserves state).
+    If context_id is provided, the existing context is reused (faster; preserves state)
+    and the original cluster_id must also be provided.
     If cluster_id is omitted, auto-selects the best running accessible cluster.
 
     Raises:
@@ -386,6 +393,14 @@ def run_code_on_cluster(
             error=f"Unsupported language: {language!r}. Must be one of: {', '.join(_LANGUAGE_MAP)}.",
             output_kind="none",
             cluster_id=cluster_id,
+        )
+
+    if context_id is not None and cluster_id is None:
+        return ClusterExecutionResult(
+            success=False,
+            error="cluster_id is required when reusing context_id on a cluster.",
+            output_kind="none",
+            context_id=context_id,
         )
 
     client = get_client(profile)
@@ -417,12 +432,20 @@ def run_code_on_cluster(
         )
 
         if destroy_context_on_completion:
-            destroy_context(cluster_id, context_id, profile)
-            result.context_destroyed = True
+            context_destroyed = destroy_context(cluster_id, context_id, profile)
+            result.context_destroyed = context_destroyed
             result.message = (
-                "Execution successful. Context was destroyed."
-                if result.success
-                else "Execution failed. Context was destroyed."
+                (
+                    "Execution successful. Context was destroyed."
+                    if result.success
+                    else "Execution failed. Context was destroyed."
+                )
+                if context_destroyed
+                else (
+                    "Execution succeeded, but the context could not be destroyed."
+                    if result.success
+                    else "Execution failed, and the context could not be destroyed."
+                )
             )
 
         return result
@@ -430,8 +453,7 @@ def run_code_on_cluster(
     except Exception as exc:
         context_destroyed = False
         if destroy_context_on_completion and context_id is not None:
-            destroy_context(cluster_id, context_id, profile)
-            context_destroyed = True
+            context_destroyed = destroy_context(cluster_id, context_id, profile)
         return ClusterExecutionResult(
             success=False,
             error=str(exc),
@@ -442,6 +464,8 @@ def run_code_on_cluster(
             message=(
                 "Execution failed. Context was destroyed."
                 if context_destroyed
+                else "Execution failed, and the context could not be destroyed."
+                if destroy_context_on_completion and context_id is not None
                 else "Execution failed."
             ),
         )

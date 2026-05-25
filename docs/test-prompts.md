@@ -175,7 +175,7 @@ Use execute_code with compute_type="cluster" on cluster <CLUSTER_ID> to run this
 
 ```text
 Use execute_code with compute_type="cluster" on cluster <CLUSTER_ID> to run this Python snippet: x = 41; print(x)
-Then reuse the returned context_id and run: print(x + 1)
+Then reuse the returned context_id with the same cluster_id and run: print(x + 1)
 ```
 
 ### Scala snippet
@@ -220,7 +220,7 @@ dbutils.notebook.exit("done")
 ### Upload and run from a local file
 
 ```text
-Use execute_notebook to upload notebooks/<LOCAL_NOTEBOOK_FILE> to /Workspace/Users/me/mcp-file-test and run it on cluster <CLUSTER_ID>.
+Use execute_notebook to upload notebooks/<LOCAL_NOTEBOOK_FILE> from the current working directory to /Workspace/Users/me/mcp-file-test and run it on cluster <CLUSTER_ID>.
 ```
 
 ### Run with notebook parameters

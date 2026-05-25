@@ -106,6 +106,28 @@ class NotebookJobRunnerTests(unittest.TestCase):
         client.workspace.import_.assert_called_once()
         client.workspace.delete.assert_called_once()
 
+    @patch("databricks_mcp.notebook_jobs.get_client")
+    def test_timeout_requests_cancel_and_keeps_temp_upload(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        wait = _successful_wait()
+        wait.result.side_effect = TimeoutError
+        client.jobs.submit.return_value = wait
+        client.jobs.get_run.side_effect = [SimpleNamespace(run_page_url="https://example.test/runs/123")]
+        mock_get_client.return_value = client
+
+        result = run_notebook_job(
+            compute_type="serverless",
+            code="print('hello')",
+            language="python",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.state, "TIMEDOUT")
+        self.assertIn("Cancel requested.", result.message)
+        self.assertIn("cleanup was skipped", result.message)
+        client.jobs.cancel_run.assert_called_once_with(run_id=123)
+        client.workspace.delete.assert_not_called()
+
     def test_cluster_mode_requires_cluster_id(self) -> None:
         result = run_notebook_job(compute_type="cluster", notebook_path="/Workspace/Users/tester/existing")
 

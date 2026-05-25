@@ -234,6 +234,7 @@ def run_notebook_job(
     start_time = time.time()
     run_id: int | None = None
     run_url: str | None = None
+    skip_cleanup = False
 
     try:
         if should_upload:
@@ -314,6 +315,20 @@ def run_notebook_job(
             run = wait.result(timeout=datetime.timedelta(seconds=timeout))
         except TimeoutError:
             elapsed = round(time.time() - start_time, 2)
+            cancel_message = ""
+            if run_id is not None:
+                try:
+                    client.jobs.cancel_run(run_id=run_id)
+                    cancel_message = " Cancel requested."
+                except Exception:
+                    logger.debug("Failed to request cancellation for timed out run_id=%s", run_id)
+                    cancel_message = " Cancel could not be requested."
+            if cleanup and should_upload:
+                skip_cleanup = True
+                cancel_message += (
+                    f" Temporary notebook cleanup was skipped for {effective_notebook_path} "
+                    "because the remote run may still be active."
+                )
             return NotebookJobRunResult(
                 success=False,
                 error=f"Run timed out after {timeout}s.",
@@ -322,7 +337,7 @@ def run_notebook_job(
                 run_url=run_url,
                 duration_seconds=elapsed,
                 state="TIMEDOUT",
-                message=f"Notebook run {run_id} did not complete within {timeout}s.",
+                message=f"Notebook run {run_id} did not complete within {timeout}s.{cancel_message}",
                 notebook_path=effective_notebook_path,
                 cluster_id=cluster_id,
             )
@@ -400,5 +415,5 @@ def run_notebook_job(
             cluster_id=cluster_id,
         )
     finally:
-        if cleanup and should_upload:
+        if cleanup and should_upload and not skip_cleanup:
             cleanup_workspace_notebook(client=client, workspace_path=effective_notebook_path)

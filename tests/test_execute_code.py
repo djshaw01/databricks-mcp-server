@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -126,9 +127,42 @@ class ExecuteCodeToolTests(unittest.TestCase):
             path = Path(temp_dir) / "query.sql"
             path.write_text("SELECT 1", encoding="utf-8")
 
-            execute_code(file_path=str(path))
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=Path(temp_dir)):
+                execute_code(file_path=str(path))
 
         self.assertEqual(mock_run_code_on_serverless.call_args.kwargs["language"], "sql")
+        self.assertEqual(mock_run_code_on_serverless.call_args.kwargs["code"], "SELECT 1")
+
+    @patch("databricks_mcp.server.run_code_on_serverless")
+    def test_rejects_file_path_outside_cwd_by_default(self, mock_run_code_on_serverless: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir) / "workspace"
+            workspace_dir.mkdir()
+            outside_path = Path(temp_dir) / "query.sql"
+            outside_path.write_text("SELECT 1", encoding="utf-8")
+
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=workspace_dir):
+                result = execute_code(file_path=str(outside_path))
+
+        self.assertFalse(result["success"])
+        self.assertIn("current working directory", result["error"])
+        mock_run_code_on_serverless.assert_not_called()
+
+    @patch.dict(os.environ, {"DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS": "1"}, clear=False)
+    @patch("databricks_mcp.server.run_code_on_serverless")
+    def test_allows_file_path_outside_cwd_when_opted_in(self, mock_run_code_on_serverless: MagicMock) -> None:
+        mock_run_code_on_serverless.return_value.to_dict.return_value = {"success": True}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir) / "workspace"
+            workspace_dir.mkdir()
+            outside_path = Path(temp_dir) / "query.sql"
+            outside_path.write_text("SELECT 1", encoding="utf-8")
+
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=workspace_dir):
+                result = execute_code(file_path=str(outside_path))
+
+        self.assertTrue(result["success"])
         self.assertEqual(mock_run_code_on_serverless.call_args.kwargs["code"], "SELECT 1")
 
     @patch("databricks_mcp.server.run_code_on_cluster")
@@ -151,7 +185,10 @@ class ExecuteCodeToolTests(unittest.TestCase):
         self.assertEqual(result["compute_type_resolved"], "cluster")
 
     def test_missing_file_returns_error(self) -> None:
-        result = execute_code(file_path="/does/not/exist.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "does-not-exist.py"
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=Path(temp_dir)):
+                result = execute_code(file_path=str(missing_path))
 
         self.assertFalse(result["success"])
         self.assertIn("not found", result["error"].lower())
@@ -161,7 +198,8 @@ class ExecuteCodeToolTests(unittest.TestCase):
             path = Path(temp_dir) / "demo.ipynb"
             path.write_text("{}", encoding="utf-8")
 
-            result = execute_code(file_path=str(path))
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=Path(temp_dir)):
+                result = execute_code(file_path=str(path))
 
         self.assertFalse(result["success"])
         self.assertIn("execute_notebook", result["error"])
@@ -177,6 +215,37 @@ class ExecuteCodeToolTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("serverless execution", result["error"].lower())
+
+    def test_context_id_requires_cluster_id(self) -> None:
+        result = execute_code(code="print('hi')", compute_type="cluster", context_id="ctx-1")
+
+        self.assertFalse(result["success"])
+        self.assertIn("cluster_id", result["error"])
+
+    @patch("databricks_mcp.server.run_code_on_cluster")
+    def test_cluster_path_returns_structured_error_for_configuration_failures(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = ValueError("missing host")
+
+        result = execute_code(code="print('hi')", compute_type="cluster", cluster_id="abc")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["state"], "FAILED")
+        self.assertEqual(result["compute_type_resolved"], "cluster")
+
+    @patch("databricks_mcp.server.run_code_on_cluster")
+    def test_trims_cluster_identifiers(self, mock_run: MagicMock) -> None:
+        mock_run.return_value.to_dict.return_value = {"success": True}
+
+        result = execute_code(
+            code="print('hi')",
+            compute_type=" cluster ",
+            cluster_id=" abc ",
+            context_id=" ctx-1 ",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_run.call_args.kwargs["cluster_id"], "abc")
+        self.assertEqual(mock_run.call_args.kwargs["context_id"], "ctx-1")
 
 
 class ExecuteNotebookToolTests(unittest.TestCase):
@@ -236,12 +305,13 @@ class ExecuteNotebookToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "demo.scala"
             path.write_text("// Databricks notebook source\nprintln(42)", encoding="utf-8")
-            result = execute_notebook(
-                file_path=str(path),
-                notebook_path="/Workspace/Users/tester/demo",
-                compute_type="cluster",
-                cluster_id="abc",
-            )
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=Path(temp_dir)):
+                result = execute_notebook(
+                    file_path=str(path),
+                    notebook_path="/Workspace/Users/tester/demo",
+                    compute_type="cluster",
+                    cluster_id="abc",
+                )
 
         self.assertTrue(result["success"])
         self.assertEqual(result["compute_type_resolved"], "cluster")
@@ -279,6 +349,38 @@ class ExecuteNotebookToolTests(unittest.TestCase):
         self.assertEqual(result["compute_type_requested"], "cluster")
         self.assertEqual(result["language"], "python")
         self.assertEqual(result["output_kind"], "text")
+
+    @patch("databricks_mcp.server.run_notebook_job")
+    def test_execute_notebook_trims_remaining_string_inputs(self, mock_run_notebook_job: MagicMock) -> None:
+        mock_run_notebook_job.return_value.to_dict.return_value = {"success": True}
+
+        result = execute_notebook(
+            notebook_path=" /Workspace/Users/tester/demo ",
+            compute_type=" cluster ",
+            language=" python ",
+            run_name=" nightly-run ",
+            cluster_id=" abc ",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_run_notebook_job.call_args.kwargs["notebook_path"], "/Workspace/Users/tester/demo")
+        self.assertEqual(mock_run_notebook_job.call_args.kwargs["run_name"], "nightly-run")
+        self.assertEqual(mock_run_notebook_job.call_args.kwargs["cluster_id"], "abc")
+
+    @patch("databricks_mcp.server.run_notebook_job")
+    def test_execute_notebook_rejects_file_path_outside_cwd_by_default(self, mock_run_notebook_job: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir) / "workspace"
+            workspace_dir.mkdir()
+            outside_path = Path(temp_dir) / "demo.scala"
+            outside_path.write_text("// Databricks notebook source\nprintln(42)", encoding="utf-8")
+
+            with patch("databricks_mcp.server.pathlib.Path.cwd", return_value=workspace_dir):
+                result = execute_notebook(file_path=str(outside_path), notebook_path="/Workspace/Users/tester/demo")
+
+        self.assertFalse(result["success"])
+        self.assertIn("current working directory", result["error"])
+        mock_run_notebook_job.assert_not_called()
 
 
 class RunCodeOnServerlessTests(unittest.TestCase):
@@ -673,6 +775,26 @@ class JobRunToolsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "views_to_export"):
             get_job_run_export(run_id=123, views_to_export="widgets")
 
+    @patch("databricks_mcp.server._get_client")
+    def test_get_job_run_export_counts_empty_html_view_content(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.get_run.return_value = SimpleNamespace(tasks=[])
+        client.jobs.export_run.return_value = SimpleNamespace(
+            views=[
+                SimpleNamespace(
+                    name="Notebook",
+                    type=SimpleNamespace(value="NOTEBOOK"),
+                    content="",
+                )
+            ]
+        )
+        mock_get_client.return_value = client
+
+        result = get_job_run_export(run_id=123)
+
+        self.assertEqual(result["html_view_count"], 1)
+        self.assertEqual(result["views"][0]["content"], "")
+
 
 class RunCodeOnClusterTests(unittest.TestCase):
     def test_cluster_result_defaults_context_destroyed_to_false(self) -> None:
@@ -751,6 +873,39 @@ class RunCodeOnClusterTests(unittest.TestCase):
         self.assertFalse(result.context_destroyed)
         self.assertEqual(result.message, "Execution failed.")
         mock_destroy_context.assert_not_called()
+
+    def test_context_reuse_requires_cluster_id(self) -> None:
+        result = run_code_on_cluster(code="print(1)", context_id="ctx-1")
+
+        self.assertFalse(result.success)
+        self.assertIn("cluster_id", result.error)
+
+    @patch("databricks_mcp.compute_cluster.destroy_context", return_value=False)
+    @patch("databricks_mcp.compute_cluster._run_on_context")
+    @patch("databricks_mcp.compute_cluster.create_context")
+    @patch("databricks_mcp.compute_cluster.get_client")
+    def test_destroy_context_failure_does_not_claim_success(
+        self,
+        mock_get_client: MagicMock,
+        mock_create_context: MagicMock,
+        mock_run_on_context: MagicMock,
+        mock_destroy_context: MagicMock,
+    ) -> None:
+        mock_get_client.return_value = MagicMock()
+        mock_create_context.return_value = "ctx-3"
+        mock_run_on_context.return_value = ClusterExecutionResult(
+            success=True,
+            output="ok",
+            output_kind="text",
+            cluster_id="abc",
+            context_id="ctx-3",
+            context_destroyed=False,
+        )
+
+        result = run_code_on_cluster(code="print(1)", cluster_id="abc", destroy_context_on_completion=True)
+
+        self.assertFalse(result.context_destroyed)
+        self.assertEqual(result.message, "Execution succeeded, but the context could not be destroyed.")
 
 
 class StartClusterTests(unittest.TestCase):

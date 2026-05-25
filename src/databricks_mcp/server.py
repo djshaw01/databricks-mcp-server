@@ -80,7 +80,7 @@ def _normalize_execute_code_response(
         "error": result.get("error"),
         "message": result.get("message"),
         "output": result.get("output"),
-        "output_kind": result.get("output_kind", "text" if result.get("output") else "none"),
+        "output_kind": result.get("output_kind", "text" if result.get("output") is not None else "none"),
         "language": language,
         "compute_type_requested": requested_compute_type,
         "compute_type_resolved": resolved_compute_type,
@@ -254,9 +254,9 @@ def execute_code(
     """
     code = _none_if_empty(code)
     file_path = _none_if_empty(file_path)
-    compute_type = (_none_if_empty(compute_type) or "auto").lower()
+    compute_type = ((_none_if_empty(compute_type) or "auto").strip()).lower()
     requested_compute_type = compute_type
-    language = (_none_if_empty(language) or "python").lower()
+    language = ((_none_if_empty(language) or "python").strip()).lower()
     workspace_path = _none_if_empty(workspace_path)
     run_name = _none_if_empty(run_name)
     cluster_id = _none_if_empty(cluster_id)
@@ -418,9 +418,9 @@ def execute_notebook(
     code = _none_if_empty(code)
     file_path = _none_if_empty(file_path)
     notebook_path = _none_if_empty(notebook_path)
-    compute_type = (_none_if_empty(compute_type) or "serverless").lower()
+    compute_type = ((_none_if_empty(compute_type) or "serverless").strip()).lower()
     requested_compute_type = compute_type
-    language = (_none_if_empty(language) or "python").lower()
+    language = ((_none_if_empty(language) or "python").strip()).lower()
     run_name = _none_if_empty(run_name)
     cluster_id = _none_if_empty(cluster_id)
 
@@ -745,6 +745,8 @@ def get_job_run_output(run_id: int, task_key: str = "", profile: str = "") -> di
     """
     client = _get_client(profile)
     normalized_task_key = _none_if_empty(task_key)
+    if normalized_task_key is not None:
+        normalized_task_key = normalized_task_key.strip()
     resolved_run_id, resolved_task_key = _resolve_run_output_target(
         client=client,
         run_id=run_id,
@@ -795,6 +797,8 @@ def get_job_run_export(
     """
     client = _get_client(profile)
     normalized_task_key = _none_if_empty(task_key)
+    if normalized_task_key is not None:
+        normalized_task_key = normalized_task_key.strip()
     resolved_run_id, resolved_task_key = _resolve_run_output_target(
         client=client,
         run_id=run_id,

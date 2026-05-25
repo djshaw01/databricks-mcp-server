@@ -90,6 +90,20 @@ class ExecuteCodeToolTests(unittest.TestCase):
         )
 
     @patch("databricks_mcp.server.run_code_on_serverless")
+    def test_trims_whitespace_in_compute_type_and_language(self, mock_run_code_on_serverless: MagicMock) -> None:
+        mock_run_code_on_serverless.return_value.to_dict.return_value = {
+            "success": True,
+            "output": "",
+        }
+
+        result = execute_code(code="print('hi')", compute_type=" serverless ", language=" python ")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["compute_type_requested"], "serverless")
+        self.assertEqual(result["language"], "python")
+        self.assertEqual(result["output_kind"], "text")
+
+    @patch("databricks_mcp.server.run_code_on_serverless")
     def test_workspace_path_disables_cleanup(self, mock_run_code_on_serverless: MagicMock) -> None:
         mock_run_code_on_serverless.return_value.to_dict.return_value = {"success": True}
 
@@ -249,6 +263,22 @@ class ExecuteNotebookToolTests(unittest.TestCase):
             mock_run_notebook_job.call_args.kwargs["notebook_parameters"],
             {"env": "dev", "limit": "10"},
         )
+
+    @patch("databricks_mcp.server.run_notebook_job")
+    def test_trims_whitespace_in_execute_notebook_inputs(self, mock_run_notebook_job: MagicMock) -> None:
+        mock_run_notebook_job.return_value.to_dict.return_value = {"success": True, "output": ""}
+
+        result = execute_notebook(
+            notebook_path="/Workspace/Users/tester/demo",
+            compute_type=" cluster ",
+            language=" python ",
+            cluster_id="abc",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["compute_type_requested"], "cluster")
+        self.assertEqual(result["language"], "python")
+        self.assertEqual(result["output_kind"], "text")
 
 
 class RunCodeOnServerlessTests(unittest.TestCase):
@@ -527,6 +557,30 @@ class JobRunToolsTests(unittest.TestCase):
         self.assertEqual(result["task_key"], "load")
         self.assertEqual(result["output"], "load complete")
         self.assertEqual(result["output_kind"], "logs")
+
+    @patch("databricks_mcp.server._get_client")
+    def test_get_job_run_output_strips_whitespace_from_task_key(self, mock_get_client: MagicMock) -> None:
+        client = MagicMock()
+        client.jobs.get_run.return_value = SimpleNamespace(
+            tasks=[
+                SimpleNamespace(task_key="extract", run_id=456),
+                SimpleNamespace(task_key="load", run_id=789),
+            ]
+        )
+        client.jobs.get_run_output.return_value = SimpleNamespace(
+            as_dict=lambda: {"notebook_output": {"result": None}, "logs": "load complete", "error": None, "error_trace": None},
+            notebook_output=SimpleNamespace(result=None),
+            logs="load complete",
+            error=None,
+            error_trace=None,
+        )
+        mock_get_client.return_value = client
+
+        result = get_job_run_output(run_id=123, task_key=" load ")
+
+        self.assertEqual(result["resolved_run_id"], 789)
+        self.assertEqual(result["task_key"], "load")
+        client.jobs.get_run_output.assert_called_once_with(run_id=789)
 
     @patch("databricks_mcp.server._get_client")
     def test_get_job_run_export_auto_resolves_single_task_run(self, mock_get_client: MagicMock) -> None:

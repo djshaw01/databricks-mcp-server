@@ -305,7 +305,7 @@ class QuerySqlToolTests(unittest.TestCase):
             },
             clear=True,
         ):
-            with patch("databricks_mcp.server.WorkspaceClient") as workspace_client:
+            with patch("databricks_mcp.workspace.WorkspaceClient") as workspace_client:
                 server._get_client("analytics")
 
         workspace_client.assert_called_once_with(

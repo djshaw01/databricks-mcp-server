@@ -4,23 +4,34 @@ Databricks MCP Server
 Exposes Databricks Jobs and Delta Live Tables (Pipelines) as MCP tools.
 """
 
+import pathlib
 import os
-import re
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError
-from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
-from databricks.sdk.service.pipelines import PipelineState
-from mcp.server.fastmcp import FastMCP
+from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState, ViewsToExport
+from fastmcp import FastMCP
 
+from databricks_mcp.compute_cluster import (
+    NoRunningClusterError,
+    get_cluster_status,
+    list_clusters,
+    run_code_on_cluster,
+    start_cluster,
+)
+from databricks_mcp.compute_serverless import run_code_on_serverless
+from databricks_mcp.notebook_jobs import run_notebook_job
 from databricks_mcp.sql_query import (
     QueryValidationError,
-    DEFAULT_SQL_POLL_TIMEOUT_SECONDS,
     execute_safe_query,
+)
+from databricks_mcp.workspace import (
+    get_client as _get_client,
+    get_sql_poll_timeout_seconds as _get_sql_poll_timeout_seconds,
+    get_warehouse_id as _get_warehouse_id,
+    parse_positive_poll_timeout_override as _parse_positive_poll_timeout_override,
 )
 
 load_dotenv()
@@ -31,141 +42,119 @@ mcp = FastMCP(
         "Browse and inspect Databricks jobs, job runs, Delta Live Tables pipelines, "
         "Unity Catalog metadata, and read-only SQL queries. Prefer Unity Catalog "
         "tools (list_catalogs/list_schemas/list_tables/get_table/search_tables/"
-        "search_columns) when finding catalogs, schemas, tables, or columns, and use "
-        "query_sql only when you need query result rows."
+        "search_columns) when finding catalogs, schemas, tables, or columns, use "
+        "query_sql only when you need query result rows, and use execute_code for "
+        "Databricks code execution on serverless workflows or interactive clusters. "
+        "Use execute_notebook when creating, modifying, rerunning, or reviewing notebooks "
+        "on either serverless or existing clusters. "
+        "When execute_code returns a serverless run_id, use get_job_run_output to "
+        "inspect notebook result text, logs, and task-level output for the flow of the job. "
+        "Use get_job_run_export when you need the exported HTML notebook view for richer "
+        "rendering during notebook iteration."
     ),
 )
 
+_FILE_EXT_LANGUAGE = {
+    ".ipynb": "python",
+    ".py": "python",
+    ".sql": "sql",
+    ".scala": "scala",
+    ".r": "r",
+}
 
-@dataclass(frozen=True)
-class WorkspaceConfig:
-    host: str
-    warehouse_id: str | None
-    sql_poll_timeout_seconds: int
-    profile: str | None
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
-def _resolve_profile(profile: str = "") -> str | None:
-    normalized_profile = profile.strip()
-    if not normalized_profile:
+def _none_if_empty(value: str | None) -> str | None:
+    if value is None:
         return None
-    if not re.search(r"[A-Za-z0-9]", normalized_profile):
-        raise ValueError("profile must contain at least one letter or number.")
-    return normalized_profile
+    return None if value.strip() == "" else value
 
 
-def _profile_env_prefix(profile: str) -> str:
-    normalized_profile = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    if not normalized_profile:
-        raise ValueError("profile must contain at least one letter or number.")
-    return f"DATABRICKS_PROFILE_{normalized_profile}"
+def _normalize_optional_string(value: str | None) -> str | None:
+    normalized = _none_if_empty(value)
+    return normalized.strip() if normalized is not None else None
 
 
-def _get_env_value(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
+def _allow_arbitrary_local_file_paths() -> bool:
+    return os.getenv("DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS", "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
-def _parse_positive_int_env(name: str, value: str | None) -> int:
-    if not value:
-        return DEFAULT_SQL_POLL_TIMEOUT_SECONDS
+def _validate_local_file_path(file_path: str) -> str:
+    expanded_path = pathlib.Path(file_path).expanduser()
+    if _allow_arbitrary_local_file_paths():
+        return str(expanded_path)
 
+    cwd = pathlib.Path.cwd().resolve()
+    resolved_path = expanded_path.resolve(strict=False)
     try:
-        parsed_value = int(value)
+        resolved_path.relative_to(cwd)
     except ValueError as exc:
         raise ValueError(
-            f"{name} must be a positive integer number of seconds."
+            "file_path must stay within the current working directory unless "
+            "DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set."
         ) from exc
-
-    if parsed_value <= 0:
-        raise ValueError(
-            f"{name} must be a positive integer number of seconds."
-        )
-    return parsed_value
+    return str(expanded_path)
 
 
-def _get_workspace_config(profile: str = "") -> WorkspaceConfig:
-    resolved_profile = _resolve_profile(profile)
-    if resolved_profile is None:
-        host = _get_env_value("DATABRICKS_HOST")
-        if not host:
-            raise ValueError(
-                "DATABRICKS_HOST must be set (e.g. https://adb-xxx.azuredatabricks.net). "
-                "Authenticate with: databricks auth login --host <workspace-url>"
-            )
-        return WorkspaceConfig(
-            host=host,
-            warehouse_id=_get_env_value("DATABRICKS_WAREHOUSE_ID"),
-            sql_poll_timeout_seconds=_parse_positive_int_env(
-                "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS",
-                _get_env_value("DATABRICKS_SQL_POLL_TIMEOUT_SECONDS"),
-            ),
-            profile=None,
-        )
+def _read_local_source_file(file_path: str) -> tuple[str, str]:
+    validated_file_path = _validate_local_file_path(file_path)
+    with open(validated_file_path, "r", encoding="utf-8") as source_file:
+        return source_file.read(), pathlib.Path(validated_file_path).suffix.lower()
 
-    env_prefix = _profile_env_prefix(resolved_profile)
-    host_key = f"{env_prefix}_HOST"
-    warehouse_id_key = f"{env_prefix}_WAREHOUSE_ID"
-    timeout_key = f"{env_prefix}_SQL_POLL_TIMEOUT_SECONDS"
 
-    host = _get_env_value(host_key)
-    if not host:
-        raise ValueError(
-            f"{host_key} must be set when profile='{resolved_profile}'."
-        )
+def _normalize_execute_code_response(
+    *,
+    result: dict[str, Any],
+    requested_compute_type: str,
+    resolved_compute_type: str,
+    language: str,
+) -> dict[str, Any]:
+    return {
+        "success": result.get("success", False),
+        "error": result.get("error"),
+        "message": result.get("message"),
+        "output": result.get("output"),
+        "output_kind": result.get("output_kind", "text" if result.get("output") is not None else "none"),
+        "language": language,
+        "compute_type_requested": requested_compute_type,
+        "compute_type_resolved": resolved_compute_type,
+        "run_id": result.get("run_id"),
+        "run_url": result.get("run_url"),
+        "duration_seconds": result.get("duration_seconds"),
+        "state": result.get("state"),
+        "workspace_path": result.get("workspace_path"),
+        "notebook_path": result.get("notebook_path"),
+        "cluster_id": result.get("cluster_id"),
+        "context_id": result.get("context_id"),
+        "context_destroyed": result.get("context_destroyed"),
+        "error_type": result.get("error_type"),
+        "available_clusters": result.get("available_clusters"),
+        "startable_clusters": result.get("startable_clusters"),
+        "skipped_clusters": result.get("skipped_clusters"),
+        "suggestions": result.get("suggestions"),
+    }
 
-    timeout_value = _get_env_value(timeout_key)
-    if timeout_value is None:
-        timeout_key = "DATABRICKS_SQL_POLL_TIMEOUT_SECONDS"
-        timeout_value = _get_env_value(timeout_key)
 
-    return WorkspaceConfig(
-        host=host,
-        warehouse_id=_get_env_value(warehouse_id_key) or _get_env_value("DATABRICKS_WAREHOUSE_ID"),
-        sql_poll_timeout_seconds=_parse_positive_int_env(timeout_key, timeout_value),
-        profile=resolved_profile,
+def _normalized_tool_error(
+    *,
+    error: str,
+    requested_compute_type: str,
+    resolved_compute_type: str,
+    language: str,
+    state: str = "INVALID_INPUT",
+) -> dict[str, Any]:
+    return _normalize_execute_code_response(
+        result={
+            "success": False,
+            "error": error,
+            "state": state,
+            "output_kind": "none",
+        },
+        requested_compute_type=requested_compute_type,
+        resolved_compute_type=resolved_compute_type,
+        language=language,
     )
-
-
-def _get_client(profile: str = "") -> WorkspaceClient:
-    # The SDK resolves credentials automatically in this order:
-    #   1. DATABRICKS_HOST + DATABRICKS_TOKEN env vars (PAT fallback)
-    #   2. OAuth U2M token stored by `databricks auth login` (~/.databrickscfg),
-    #      optionally scoped by the provided profile name
-    #   3. Azure CLI / GCP ADC / AWS instance profile (cloud environments)
-    # For local development, just run:  databricks auth login --host <workspace-url>
-    workspace_config = _get_workspace_config(profile)
-    client_kwargs: dict[str, str] = {"host": workspace_config.host}
-    if workspace_config.profile:
-        client_kwargs["profile"] = workspace_config.profile
-    return WorkspaceClient(**client_kwargs)
-
-
-def _get_warehouse_id(profile: str = "") -> str:
-    workspace_config = _get_workspace_config(profile)
-    warehouse_id = workspace_config.warehouse_id
-    if not warehouse_id:
-        if workspace_config.profile:
-            profile_warehouse_key = f"{_profile_env_prefix(workspace_config.profile)}_WAREHOUSE_ID"
-            raise ValueError(
-                f"{profile_warehouse_key} or DATABRICKS_WAREHOUSE_ID must be set to the serverless SQL warehouse to use for read-only queries."
-            )
-        raise ValueError(
-            "DATABRICKS_WAREHOUSE_ID must be set to the serverless SQL warehouse to use for read-only queries."
-        )
-    return warehouse_id
-
-
-def _get_sql_poll_timeout_seconds(profile: str = "") -> int:
-    return _get_workspace_config(profile).sql_poll_timeout_seconds
-
-
-def _parse_positive_poll_timeout_override(poll_timeout_seconds: int | None) -> int | None:
-    if poll_timeout_seconds is None:
-        return None
-    if poll_timeout_seconds <= 0:
-        raise ValueError("poll_timeout_seconds must be a positive integer number of seconds.")
-    return poll_timeout_seconds
 
 
 def _fmt_ts(ms: int | None) -> str:
@@ -175,7 +164,449 @@ def _fmt_ts(ms: int | None) -> str:
     return datetime.utcfromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _build_run_output_preview(run_output: Any) -> tuple[str | None, str]:
+    notebook_output = getattr(run_output, "notebook_output", None)
+    notebook_result = getattr(notebook_output, "result", None)
+    logs = getattr(run_output, "logs", None)
+
+    if notebook_result is not None and logs is not None:
+        return f"{notebook_result}\n\n--- Logs ---\n{logs}", "notebook_result+logs"
+    if notebook_result is not None:
+        return notebook_result, "notebook_result"
+    if logs is not None:
+        return logs, "logs"
+    return None, "none"
+
+
+def _parse_views_to_export(value: str) -> ViewsToExport:
+    normalized_value = value.strip().upper()
+    if not normalized_value:
+        return ViewsToExport.CODE
+
+    try:
+        return ViewsToExport(normalized_value)
+    except ValueError as exc:
+        valid_values = ", ".join(view.value for view in ViewsToExport)
+        raise ValueError(f"views_to_export must be one of: {valid_values}.") from exc
+
+
+def _truncate_content(content: str | None, max_characters: int | None) -> tuple[str | None, bool]:
+    if content is None or max_characters is None:
+        return content, False
+    if max_characters <= 0:
+        raise ValueError("max_view_characters must be a positive integer when provided.")
+    if len(content) <= max_characters:
+        return content, False
+    return content[:max_characters], True
+
+
+def _resolve_run_output_target(
+    *,
+    client: Any,
+    run_id: int,
+    task_key: str | None,
+) -> tuple[int, str | None]:
+    run = client.jobs.get_run(run_id)
+    tasks = run.tasks or []
+
+    if task_key:
+        for task in tasks:
+            if task.task_key == task_key:
+                return task.run_id or run_id, task.task_key
+        available = [task.task_key for task in tasks if task.task_key]
+        raise ValueError(
+            f"Run {run_id} does not have task_key={task_key!r}. Available task keys: {available or ['<none>']}."
+        )
+
+    if len(tasks) > 1:
+        available = [task.task_key for task in tasks if task.task_key]
+        raise ValueError(
+            f"Run {run_id} contains multiple tasks. Pass task_key to select one. Available task keys: {available}."
+        )
+
+    if len(tasks) == 1:
+        task = tasks[0]
+        return task.run_id or run_id, task.task_key
+
+    return run_id, None
+
+
 # ─── Jobs ────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def execute_code(
+    code: str | None = None,
+    file_path: str | None = None,
+    compute_type: str = "auto",
+    language: str = "python",
+    timeout: int | None = None,
+    workspace_path: str | None = None,
+    run_name: str | None = None,
+    cluster_id: str | None = None,
+    context_id: str | None = None,
+    destroy_context_on_completion: bool = False,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Execute code on Databricks compute (serverless or interactive cluster).
+
+    Routing:
+      - "serverless"  -> Databricks serverless workflows (Jobs API, notebooks)
+      - "cluster"     -> interactive cluster via Command Execution API
+      - "auto"        -> serverless for Python/SQL, cluster for Scala/R
+
+    Use this tool for snippets, one-off commands, and REPL-style cluster iteration.
+    For notebook authoring, reruns, or reviewing rendered notebook output, prefer
+    `execute_notebook` so the run always goes through Jobs and can be inspected with
+    `get_job_run_output` / `get_job_run_export`.
+
+    Cluster execution supports Python, SQL, Scala, and R and can reuse a
+    returned context_id with the same cluster_id to preserve state across calls.
+
+    Serverless execution creates a Databricks Jobs run. The immediate `output`
+    field is a convenience summary only:
+      - notebook result text when Databricks captures notebook_output.result
+      - stdout/stderr logs when Databricks captures logs
+      - both combined when both are available
+      - no rich notebook rendering payload beyond what Databricks exposes in run output
+
+    For serverless runs, always retain the returned `run_id`. An agent can call
+    `get_job_run_output(run_id=...)` after `execute_code` to inspect the full
+    run output, review task-level flow, and fetch logs or notebook result text
+    again. For multi-task runs, use `get_job_run` first to discover `task_key`
+    or `task_run_id`, then call `get_job_run_output(run_id=..., task_key=...)`.
+    When richer rendered notebook views are needed, call
+    `get_job_run_export(run_id=...)` to retrieve the HTML export that Databricks
+    produces for the run.
+
+    Args:
+        code: Source code to execute remotely.
+        file_path: Optional local file path (.py, .sql, .scala, .r). By default it must
+                   resolve under the current working directory unless
+                   DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set.
+        compute_type: "auto", "serverless", or "cluster".
+        language: Execution language for inline code.
+        timeout: Optional run timeout in seconds.
+        workspace_path: Optional Databricks workspace path to persist the notebook.
+                        Valid only for serverless execution.
+        run_name: Optional Jobs run name for serverless execution.
+        cluster_id: Optional interactive cluster ID for cluster execution. Required when
+                    reusing context_id.
+        context_id: Optional existing execution context to reuse on a cluster. Requires
+                    the original cluster_id.
+        destroy_context_on_completion: Destroy the execution context after a cluster run.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        A normalized result with stable top-level fields for both backends:
+        - success: Whether execution completed successfully.
+        - error: Error text when execution fails.
+        - message: Human-readable summary.
+        - output: Captured text output. For serverless runs this may include
+          notebook result text and/or logs. For cluster runs this is the command result.
+        - output_kind: "text" when output text is present, otherwise "none".
+        - language: Resolved execution language.
+        - compute_type_requested / compute_type_resolved: Requested vs actual backend.
+        - run_id / run_url / duration_seconds / state / workspace_path: Serverless run metadata.
+        - cluster_id / context_id / context_destroyed: Cluster execution metadata.
+        - error_type / available_clusters / startable_clusters / skipped_clusters / suggestions:
+          Structured cluster-routing diagnostics when applicable.
+    """
+    code = _none_if_empty(code)
+    file_path = _normalize_optional_string(file_path)
+    compute_type = (_normalize_optional_string(compute_type) or "auto").lower()
+    requested_compute_type = compute_type
+    language = (_normalize_optional_string(language) or "python").lower()
+    workspace_path = _normalize_optional_string(workspace_path)
+    run_name = _normalize_optional_string(run_name)
+    cluster_id = _normalize_optional_string(cluster_id)
+    context_id = _normalize_optional_string(context_id)
+
+    if not code and not file_path:
+        return _normalized_tool_error(
+            error="Either 'code' or 'file_path' must be provided.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
+
+    if compute_type not in {"auto", "serverless", "cluster"}:
+        return _normalized_tool_error(
+            error=(
+                f"compute_type={compute_type!r} is not valid. "
+                "Must be 'auto', 'serverless', or 'cluster'."
+            ),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
+
+    if file_path:
+        try:
+            code, suffix = _read_local_source_file(file_path)
+        except ValueError as exc:
+            return _normalized_tool_error(
+                error=str(exc),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        except FileNotFoundError:
+            return _normalized_tool_error(
+                error=f"File not found: {file_path}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        except Exception as exc:
+            return _normalized_tool_error(
+                error=f"Failed to read file: {exc}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        if suffix == ".ipynb":
+            return _normalized_tool_error(
+                error="execute_code does not support .ipynb notebooks. Use execute_notebook instead.",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        detected_language = _FILE_EXT_LANGUAGE.get(suffix)
+        if detected_language:
+            language = detected_language
+
+    if compute_type == "auto" and language in ("scala", "r"):
+        compute_type = "cluster"
+
+    cluster_only_args_used = cluster_id is not None or context_id is not None or destroy_context_on_completion
+    serverless_only_args_used = workspace_path is not None or run_name is not None
+
+    if compute_type in ("auto", "serverless") and cluster_only_args_used:
+        return _normalized_tool_error(
+            error=(
+                "cluster_id, context_id, and destroy_context_on_completion are only valid "
+                "when compute_type resolves to 'cluster'. Use compute_type='cluster' to target a cluster."
+            ),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="serverless" if compute_type != "cluster" else compute_type,
+            language=language,
+        )
+
+    if compute_type == "cluster" and serverless_only_args_used:
+        return _normalized_tool_error(
+            error=(
+                "workspace_path and run_name are only valid for serverless execution. "
+                "Remove them or use compute_type='serverless'."
+            ),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+
+    if compute_type == "cluster" and context_id is not None and cluster_id is None:
+        return _normalized_tool_error(
+            error="cluster_id is required when reusing context_id for cluster execution.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+
+    if compute_type in ("auto", "serverless"):
+        resolved_timeout = timeout if timeout is not None else 1800
+        try:
+            result = run_code_on_serverless(
+                code=code or "",
+                profile=profile,
+                language=language,
+                timeout=resolved_timeout,
+                run_name=run_name,
+                cleanup=workspace_path is None,
+                workspace_path=workspace_path,
+            )
+            return _normalize_execute_code_response(
+                result=result.to_dict(),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type="serverless",
+                language=language,
+            )
+        except (ValueError, DatabricksError) as exc:
+            return _normalize_execute_code_response(
+                result={"success": False, "error": str(exc), "state": "FAILED"},
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type="serverless",
+                language=language,
+            )
+
+    resolved_timeout = timeout if timeout is not None else 120
+    try:
+        result = run_code_on_cluster(
+            code=code or "",
+            profile=profile,
+            cluster_id=cluster_id,
+            context_id=context_id,
+            language=language,
+            timeout=resolved_timeout,
+            destroy_context_on_completion=destroy_context_on_completion,
+        )
+        return _normalize_execute_code_response(
+            result=result.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+    except NoRunningClusterError as exc:
+        return _normalize_execute_code_response(
+            result=exc.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+    except (ValueError, DatabricksError) as exc:
+        return _normalize_execute_code_response(
+            result={"success": False, "error": str(exc), "state": "FAILED"},
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+
+
+@mcp.tool()
+def execute_notebook(
+    code: str | None = None,
+    file_path: str | None = None,
+    notebook_path: str | None = None,
+    compute_type: str = "serverless",
+    language: str = "python",
+    timeout: int | None = None,
+    run_name: str | None = None,
+    cluster_id: str | None = None,
+    profile: str = "",
+    notebook_parameters: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """
+    Execute a Databricks notebook through the Jobs API on serverless or an existing cluster.
+
+    This is the preferred tool for notebook development and iteration. It supports:
+      - running an existing notebook at `notebook_path`
+      - uploading notebook content from `code` or `file_path`, then running it
+      - inspecting the resulting run with `get_job_run_output` and `get_job_run_export`
+
+    Unlike cluster-based `execute_code`, this tool does not use the Command Execution API
+    and does not return or reuse `context_id`. Every run is a Jobs notebook task with a
+    stable `run_id`.
+
+    Args:
+        code: Optional notebook source or raw .ipynb JSON content to upload and run.
+        file_path: Optional local file path (.py, .sql, .ipynb, .scala, .r) to upload and run.
+                   By default it must resolve under the current working directory unless
+                   DATABRICKS_MCP_ALLOW_ARBITRARY_LOCAL_FILE_PATHS=1 is set.
+        notebook_path: Optional existing Databricks workspace notebook path to run, or the
+                       destination path to overwrite when `code` / `file_path` is supplied.
+        compute_type: "serverless" or "cluster".
+        language: Execution language for inline source content.
+        timeout: Optional run timeout in seconds.
+        run_name: Optional Jobs run name.
+        cluster_id: Required when compute_type="cluster". Existing cluster to use.
+        profile: Optional Databricks profile name for workspace selection.
+        notebook_parameters: Optional base parameters passed to the notebook task.
+
+    Returns:
+        A normalized Jobs-backed notebook run result with:
+        - success, error, message, output, output_kind
+        - language, compute_type_requested, compute_type_resolved
+        - run_id, run_url, duration_seconds, state
+        - notebook_path
+        - cluster_id (for cluster-backed notebook runs)
+    """
+    code = _none_if_empty(code)
+    file_path = _normalize_optional_string(file_path)
+    notebook_path = _normalize_optional_string(notebook_path)
+    compute_type = (_normalize_optional_string(compute_type) or "serverless").lower()
+    requested_compute_type = compute_type
+    language = (_normalize_optional_string(language) or "python").lower()
+    run_name = _normalize_optional_string(run_name)
+    cluster_id = _normalize_optional_string(cluster_id)
+
+    if not code and not file_path and not notebook_path:
+        return _normalized_tool_error(
+            error="Provide notebook_path to run an existing notebook, or code/file_path to upload and run a notebook.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
+
+    if compute_type not in {"serverless", "cluster"}:
+        return _normalized_tool_error(
+            error=f"compute_type={compute_type!r} is not valid. Must be 'serverless' or 'cluster'.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="none",
+            language=language,
+        )
+
+    if file_path:
+        try:
+            code, suffix = _read_local_source_file(file_path)
+        except ValueError as exc:
+            return _normalized_tool_error(
+                error=str(exc),
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        except FileNotFoundError:
+            return _normalized_tool_error(
+                error=f"File not found: {file_path}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        except Exception as exc:
+            return _normalized_tool_error(
+                error=f"Failed to read file: {exc}",
+                requested_compute_type=requested_compute_type,
+                resolved_compute_type=compute_type,
+                language=language,
+            )
+        detected_language = _FILE_EXT_LANGUAGE.get(suffix)
+        if detected_language:
+            language = detected_language
+
+    if compute_type == "cluster" and not cluster_id:
+        return _normalized_tool_error(
+            error="cluster_id is required when compute_type='cluster' for execute_notebook.",
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type="cluster",
+            language=language,
+        )
+
+    resolved_timeout = timeout if timeout is not None else 1800
+    try:
+        result = run_notebook_job(
+            profile=profile,
+            compute_type=compute_type,
+            notebook_path=notebook_path,
+            code=code,
+            language=language,
+            timeout=resolved_timeout,
+            run_name=run_name,
+            cluster_id=cluster_id,
+            notebook_parameters=notebook_parameters,
+        )
+        return _normalize_execute_code_response(
+            result=result.to_dict(),
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type=compute_type,
+            language=language,
+        )
+    except (ValueError, DatabricksError) as exc:
+        return _normalize_execute_code_response(
+            result={"success": False, "error": str(exc), "state": "FAILED"},
+            requested_compute_type=requested_compute_type,
+            resolved_compute_type=compute_type,
+            language=language,
+        )
 
 
 @mcp.tool()
@@ -394,6 +825,7 @@ def get_job_run(run_id: int, profile: str = "") -> dict[str, Any]:
         task_details.append(
             {
                 "task_key": t.task_key,
+                "task_run_id": t.run_id,
                 "lifecycle_state": t_lifecycle,
                 "result_state": t_result,
                 "state_message": t_msg,
@@ -415,6 +847,117 @@ def get_job_run(run_id: int, profile: str = "") -> dict[str, Any]:
         "end_time": _fmt_ts(run.end_time),
         "run_page_url": run.run_page_url,
         "tasks": task_details,
+    }
+
+
+@mcp.tool()
+def get_job_run_output(run_id: int, task_key: str = "", profile: str = "") -> dict[str, Any]:
+    """
+    Get notebook result text, stdout/stderr logs, and error details for a Databricks job run.
+
+    For single-task runs, including runs created by `execute_code` on serverless compute,
+    the task run is resolved automatically from the parent run_id. For multi-task jobs,
+    pass task_key to choose which task's output to inspect.
+
+    Args:
+        run_id: The numeric parent run ID or task run ID.
+        task_key: Optional task key for multi-task runs.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        Run output details including notebook_output, logs, error, error_trace, and a
+        convenience `output` field that combines notebook result text and logs.
+    """
+    client = _get_client(profile)
+    normalized_task_key = _none_if_empty(task_key)
+    if normalized_task_key is not None:
+        normalized_task_key = normalized_task_key.strip()
+    resolved_run_id, resolved_task_key = _resolve_run_output_target(
+        client=client,
+        run_id=run_id,
+        task_key=normalized_task_key,
+    )
+    run_output = client.jobs.get_run_output(run_id=resolved_run_id)
+    payload = run_output.as_dict() if hasattr(run_output, "as_dict") else {}
+    notebook_output = payload.get("notebook_output") or {}
+    output_preview, output_kind = _build_run_output_preview(run_output)
+
+    return {
+        "requested_run_id": run_id,
+        "resolved_run_id": resolved_run_id,
+        "task_key": resolved_task_key,
+        "task_run_id": resolved_run_id,
+        "output": output_preview,
+        "output_kind": output_kind,
+        "notebook_output_result": notebook_output.get("result"),
+        **payload,
+    }
+
+
+@mcp.tool()
+def get_job_run_export(
+    run_id: int,
+    task_key: str = "",
+    views_to_export: str = "CODE",
+    max_view_characters: int | None = 50000,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Export a Databricks job run as HTML views for notebook iteration and richer rendering review.
+
+    For single-task runs, including runs created by `execute_code` on serverless compute,
+    the task run is resolved automatically from the parent run_id. For multi-task jobs,
+    pass task_key to choose which task's exported notebook view to retrieve.
+
+    Args:
+        run_id: The numeric parent run ID or task run ID.
+        task_key: Optional task key for multi-task runs.
+        views_to_export: Which views to export: "CODE", "DASHBOARDS", or "ALL".
+        max_view_characters: Optional per-view content limit to keep responses manageable.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        Export metadata plus HTML view items. Each view includes name, type, content,
+        content_length, and whether the content was truncated in the MCP response.
+    """
+    client = _get_client(profile)
+    normalized_task_key = _none_if_empty(task_key)
+    if normalized_task_key is not None:
+        normalized_task_key = normalized_task_key.strip()
+    resolved_run_id, resolved_task_key = _resolve_run_output_target(
+        client=client,
+        run_id=run_id,
+        task_key=normalized_task_key,
+    )
+    export_view = _parse_views_to_export(views_to_export)
+    export_output = client.jobs.export_run(run_id=resolved_run_id, views_to_export=export_view)
+
+    views = []
+    html_view_count = 0
+    for view in export_output.views or []:
+        content, truncated = _truncate_content(getattr(view, "content", None), max_view_characters)
+        original_content = getattr(view, "content", None)
+        if original_content is not None:
+            html_view_count += 1
+        views.append(
+            {
+                "name": getattr(view, "name", None),
+                "type": getattr(getattr(view, "type", None), "value", None),
+                "content": content,
+                "content_length": len(original_content) if original_content is not None else 0,
+                "content_truncated": truncated,
+            }
+        )
+
+    return {
+        "requested_run_id": run_id,
+        "resolved_run_id": resolved_run_id,
+        "task_key": resolved_task_key,
+        "task_run_id": resolved_run_id,
+        "views_to_export": export_view.value,
+        "view_count": len(views),
+        "html_view_count": html_view_count,
+        "views": views,
     }
 
 
@@ -901,6 +1444,50 @@ def search_columns(
             pass  # skip tables with no access
 
     return matches
+
+
+@mcp.tool()
+def list_compute(
+    include_terminated: bool = False,
+    profile: str = "",
+) -> list[dict[str, Any]]:
+    """
+    List user-created interactive Databricks clusters.
+
+    Args:
+        include_terminated: When True, also include terminated and error clusters.
+        profile: Optional Databricks profile name for workspace selection.
+
+    Returns:
+        List of cluster summaries with cluster_id, cluster_name, state, and creator.
+    """
+    return list_clusters(profile=profile, include_terminated=include_terminated)
+
+
+@mcp.tool()
+def manage_cluster(
+    action: str,
+    cluster_id: str,
+    profile: str = "",
+) -> dict[str, Any]:
+    """
+    Manage the lifecycle of an interactive Databricks cluster.
+
+    Supported actions:
+      - "status": return the current cluster state
+      - "start": start a terminated cluster
+    """
+    action = (action or "").strip().lower()
+    if action == "status":
+        result = get_cluster_status(cluster_id, profile)
+        return {"success": True, "error": None, **result}
+    if action == "start":
+        result = start_cluster(cluster_id, profile)
+        return {"success": True, "error": None, **result}
+    return {
+        "success": False,
+        "error": f"Unknown action {action!r}. Must be 'status' or 'start'.",
+    }
 
 
 def main():
